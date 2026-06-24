@@ -1,0 +1,547 @@
+---
+title: "Giardia, PCR+ analysis"
+date: "updated: `r Sys.time()`"
+format:
+  html:
+    self-contained: true
+    toc: true
+    embed-resources: true
+    code-fold: true
+    link-external-newwindow: true
+execute: 
+  echo: true
+  warning: false
+  message: false
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+## File overview
+
+The purpose of this file is to further investigate the discrepancy in
+Giardia PCR and IgG responses for the ECoMiD cohort.
+
+In short, we found a larger than average proportion of PCR+ samples were
+IgG- for Giardia compared to all other pathogens in the panel.
+
+The two plausible explanations we would like to investigate whether:
+
+1.  **PCR is overestimating** (different target than serology, perhaps
+    capturing Giardia strain incidence that is not captured by serology)
+
+2.  **Luminex IgG is underestimating** (not enough exposure to
+    seroconvert, bead issue, ect)
+
+**Objectives of the analysis are**:
+
+1.  For PCR+ data, visualize the raw TAC ct values for PCR results
+    (borderline results).
+2.  For PCR+ data, visualize IgG MFI values for IgG results (borderline
+    results).
+
+**Important to note:**
+
+1.  Childsets are coded PCR/IgG status at the **antigen** level from
+    10-ecomid_spaghetti_plots.qmd
+
+2.  Childsets are coded conditional on a PCR+ result occurring before
+    the *last occurrence* of an IgG result. This means if the PCR result
+    was positive only at 24 months, the childset will be coded as PCR-.
+    It also means if the only PCR+ result was at or after the last
+    occurrence of an IgG result, the childset will be coded as PCR- (see
+    table below). In other words, to classify children, PCR+ results
+    were required to occur before the final available serology
+    measurement. PCR+ detections observed only at the last serology
+    timepoint were excluded, regardless if they were IgG+ or IgG-,
+    because no subsequent IgG follow-up was available to assess
+    seroconversion.
+
+3.  Due to exclusion criteria: 20 childsets were coded as PCR-, despite
+    having a PCR+ result for VSP5_Giardia.
+
+| PCR status | IgG status | Coded as... |
+|------------------------|------------------------|------------------------|
+| +, at any timepoint before last IgG result | +, at any timepoint | PCR+IgG+ |
+| +, at any timepoint before last IgG result | -, at all timepoints | PCR+IgG- |
+| -, at all timepoints before last IgG result | +, at any timepoint | PCR-IgG+ |
+| -, at all timepoints before last IgG result | -, at all timepoints | PCR-IgG- |
+
+: *PCR+ only counts if it occurs strictly before the last recorded IgG
+timepoint, or if a PCR+ at the last IgG timepoint is accompanied by at
+least one earlier PCR+ event*
+
+## System setup
+
+```{r}
+# Read in files 
+library(here)
+source(here("R", "0-config.R"))
+```
+
+## Read in files
+
+```{r}
+# seropositivity individual level
+# don't include MFI to avoid confusion with GPP MFI down the line!
+sero_pos <- read_csv(here("..","..",
+                      "Data","serology","final","ecomid_serology_datasets",
+                      "ecomid_sero_antigen_seropos_long_2026-05-19.csv")) %>% filter(antigen != "hyle") %>% select(-mfi, -log10mfi, -mficut, -mficut_desc) %>% 
+  mutate(community_type2 = case_when(community_type == "Rural Road" ~ "Rural", 
+                                    community_type == "Rural River" ~ "Rural", 
+                                    community_type == "Borbon" ~ "Borbon", 
+                                    community_type == "Esmeraldas" ~ "Esmeraldas City"))
+
+
+# pcr individual level
+pcr <- readRDS(here("data/ecomid_pcr_analysis_data_2026-06-11.rds")) %>% ungroup() %>% 
+  rename(hhid = childid, 
+         sampleid = sample_ID) %>% 
+  mutate(childid = substr(sampleid, start = 1, stop = 6))
+
+pcr$community_type <- as.character(pcr$community_type)
+pcr <- pcr %>% 
+  mutate(community_type2 = case_when(community_type == "Rural Road" ~ "Rural", 
+                                    community_type == "Rural River" ~ "Rural", 
+                                    community_type == "Borbon" ~ "Borbon", 
+                                    community_type == "Esmeraldas" ~ "Esmeraldas City")) %>% rename(timepoint = visit)
+pcr$community_type2 <- factor(pcr$community_type2, levels = c("Esmeraldas City", "Borbon", "Rural")) 
+
+# filter it down to the 370 children that were in both cohorts
+pcr <- pcr %>% filter(childid %in% sero_pos$childid) 
+
+table(pcr$timepoint)
+table(pcr$pcr_assay)
+
+# tac raw results (ct values)
+tac <- read_csv(here("../../Data/tac-full/final/TAC_data_pathogensbysamples_CT_20260316.csv")) %>% 
+  select(-`...1`, -X, -Collection.Date, -Collection.Month, -Community.type, -Age, -Community, -season, -sex, -HH.ID)
+
+# Luminex PCR: log calls
+gpp <- read_rds(here("../../Data/gpp-full/final/gpp_cleaned_files/gpp_final_calls_clean_20260610.rds")) %>% mutate(gpp_target = ifelse(gpp_target == "ETEC_LT", "LT-ETEC", gpp_target)) %>% mutate(timepoint = as.numeric(age)) %>% rename(sampleid = sample)
+
+# Assay categorization (PCR/IgG)
+assay <- read_rds(here("output/ecomid_seropos_pcr_alltargets.rds"))
+```
+
+## 1) Giardia
+
+### A) TAC: CT values
+
+Data clean: merge the ct values
+
+```{r}
+# create merging variable to pcr dataset 
+pcr2 <- pcr %>% mutate(id_tp = 
+                         paste0(substr(childid, start = 3, stop = 6), 
+                                sprintf("%02d", timepoint)))
+
+# pivot tac ct values longer for joining
+tac_long <- tac %>%
+  pivot_longer(cols = 2:48, names_to = "tac_target", 
+               values_to = "ct_value")
+
+# filter down to Giardia 
+tac_long <- tac_long %>% filter(tac_target == "Giardia_18S") %>% mutate(pathogen = "Giardia")
+
+# join to Giardia PCR records
+pcr_ct <- left_join(pcr2, tac_long, by = c("id_tp", "pathogen")) %>% 
+  filter(pathogen == "Giardia", pcr_assay == "tac")  
+
+# merge in IgG seroposivity at each timepoint
+igg_ct <- left_join(pcr_ct, 
+                    sero_pos %>% select(childid, timepoint, seropos, pathogen) %>% 
+                      filter(pathogen == "Giardia"), 
+                    by = c("childid", "timepoint", "pathogen"))
+
+# how much missing data (at limit of detection?)
+print("No. unique children with CT value and IgG value")
+length(unique(igg_ct$childid))
+
+print("CT value, NAs")
+table(is.na(igg_ct$ct_value))
+
+print("Missing data: CT values")
+igg_ct %>% 
+  summarise(
+    total_rows = n(),
+    n_na = sum(is.na(ct_value)), 
+    percent_missing = round(n_na / total_rows * 100, 2)
+  )
+
+print("Missing data: IgG")
+igg_ct %>% 
+  summarise(
+    total_rows = n(),
+    n_na = sum(is.na(seropos)), 
+    percent_missing = round(n_na / total_rows * 100, 2)
+  )
+```
+
+Many NA values for CT values is likely due to limit of detection for the
+assay \*will be for the 6, 12, 18 months samples
+
+```{r}
+# label seroposivity and TAC positivity
+igg_ct <- igg_ct %>% 
+  mutate(seropos2 = ifelse(seropos == 1, "IgG+", "IgG-")) 
+
+unique(igg_ct$timepoint)
+
+igg_ct <- igg_ct %>% mutate(tacpos = ifelse(pcrpos == 1, "TAC+", "TAC-"))
+
+table(igg_ct$tacpos, igg_ct$seropos2)
+igg_ct$ct_value <- as.numeric(igg_ct$ct_value)
+```
+
+```{r}
+
+# Add in assay categorization that was completed in 10-ecomid_mfi_spaghetti_plots.qmd
+
+# How many of these PCR+ are missing a tac ct value (should be none)
+igg_ct %>% 
+  filter(pcrpos == 1) %>%
+  summarise(
+    total_rows = n(),
+    n_na = sum(is.na(ct_value)), 
+    percent_missing = round(n_na / total_rows * 100, 2)
+  )
+
+# merge in childset-level PCR/IgG classification from assay object
+igg_ct2 <- igg_ct %>% ungroup() %>% 
+  left_join(assay %>% distinct(childid, pathogen, assay_pos), 
+            by = c("childid", "pathogen")) %>% 
+  filter(pcrpos == 1, 
+         assay_pos == "PCR+ IgG+" | 
+           assay_pos == "PCR+ IgG-") # filter down to those categorized in the spaghetti plots as PCR+ 
+         
+# duplicate data and label as "Overall"
+igg_ct_overall <- igg_ct2 %>%
+  mutate(community_type2 = "Overall")
+
+# combine with original community level data
+igg_ct_combined <- bind_rows(igg_ct2, igg_ct_overall)
+
+# assign levels
+igg_ct_combined$community_type2 <- 
+  factor(igg_ct_combined$community_type2, 
+         levels = c("Esmeraldas City", "Borbon", "Rural", "Overall"))
+
+#------------#
+# Code Check #
+#------------#
+
+# total TAC+ results before assay_pos filter
+cat("Total TAC+ results before assay_pos filter")
+igg_ct %>% filter(pcrpos == 1) %>% nrow()
+
+# TAC+ results after filtering to PCR+ IgG+ and PCR+ IgG- only
+cat("TAC+ results after assay_pos filter")
+igg_ct2 %>% nrow()
+
+cat("Total TAC+ data excluded")
+(igg_ct %>% filter(pcrpos == 1) %>% nrow()) - (igg_ct2 %>% nrow())
+```
+
+#### i) Mann-Whitney U test
+
+```{r}
+# repeated measures: number of children with a PCR+ TAC value
+
+cat("Number of children with repeated measures")
+igg_ct_combined %>% group_by(childid) %>% 
+  summarise(n_tacpos = n()) %>% 
+  group_by(n_tacpos) %>% 
+  summarise(n_children = n())
+
+# counts for the plot
+igg_ct_combined %>% 
+  distinct(childid, assay_pos) %>% 
+  count(assay_pos) %>% 
+  print()
+
+# Community-specific Mann-Whitney 
+igg_ct_combined$assay_pos <- factor(igg_ct_combined$assay_pos, 
+                                    levels = c("PCR+ IgG-", "PCR+ IgG+"))
+levels(igg_ct_combined$assay_pos)
+
+mannwhitney_ct <- igg_ct_combined %>%
+  filter(!is.na(ct_value), !is.na(assay_pos)) %>%
+  group_by(community_type2) %>%
+  summarise(
+    test = list(wilcox.test(ct_value ~ assay_pos, conf.int = TRUE)),
+    total_n = n(),
+    n_IgG_neg = sum(assay_pos == "PCR+ IgG-"),
+    n_IgG_pos = sum(assay_pos == "PCR+ IgG+")
+  ) %>%
+  mutate(
+    W = sapply(test, \(x) as.numeric(x$statistic)),
+    U = W - (n_IgG_neg * (n_IgG_neg + 1)) / 2,
+    p_value = round(sapply(test, \(x) x$p.value), 5),
+    conf_low = sapply(test, \(x) x$conf.int[1]),
+    conf_high = sapply(test, \(x) x$conf.int[2])
+  ) %>%
+  select(-test) %>%
+  mutate(p_value_print = ifelse(p_value < 0.001, "p < 0.001", paste0("p = ", sprintf("%1.3f", p_value))))
+
+mannwhitney_ct
+```
+
+#### ii) CT plot
+
+The analysis here is done for IgG status at the entire childset level
+(over the course of the study) and is subset to timepoints when TAC was
+positive
+
+```{r}
+set.seed(12345) # set seed for consistent point jitter
+
+tac_giardia <- ggplot(
+  igg_ct_combined,
+  aes(x = assay_pos, y = ct_value)
+) + 
+  geom_boxplot(notch = FALSE, outlier.shape = NA) +
+  geom_jitter(
+    aes(color = factor(community_type2)),
+    alpha = 0.75, position = position_jitter(width = 0.2, height = 0, seed = 12345)
+  ) + 
+  geom_hline(yintercept = 35, color = "black", linetype = "dashed") +
+  facet_grid(~ community_type2) +
+  scale_y_reverse(
+    limits = c(10, 40),
+    breaks = seq(10, 40, 5)
+  ) +
+  geom_text(data = mannwhitney_ct, aes(x = 1.5, y = 10, label = p_value_print)) + 
+  scale_x_discrete(labels = c("IgG-", "IgG+")) +
+  scale_color_manual(
+    values = c(
+      "Esmeraldas City" = nytpal[1],
+      "Borbon" = nytpal[2],
+      "Rural" = nytpal[3],
+      "Overall" = "gray30"
+    )
+  ) +
+  theme_classic() +
+  theme(
+    panel.grid = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title.x = element_blank(),
+    legend.position = "none"
+  ) + 
+  labs(
+    subtitle = "Giardia 18S Ct value for PCR positive samples by TAC (ages 6, 12, 18 months)",
+    y = "TAC Ct value", x = "child seroconversion status",
+    color = ""
+  ) 
+
+tac_giardia <- tac_giardia +
+  labs(tag = "A)") +
+  theme(
+    plot.tag = element_text(size = 14, face = "bold"),
+    plot.tag.position = c(0.01, 1)
+  )
+tac_giardia
+
+ggsave(here("figures/giardia_ct_values_4panel.tiff"), tac_giardia, height=5, width=10)
+```
+
+### B) Luminex: MFI values
+
+24 month removed for Luminex
+
+```{r}
+# create mfi df
+# note: some pathogens have multiple PCR targets so the merge is not 1-to-1;
+# Giardia has a single GPP target so this is fine here
+
+gpp <- gpp %>% rename(id_tp = id_time)
+                      
+pcr_mfi <- left_join(pcr2 %>% 
+                       filter(pcr_assay == "gpp") %>% 
+                       select(id_tp, pathogen, pcrpos, timepoint, childid), 
+                     gpp %>% select(-childid), 
+                     by = c("id_tp", "pathogen", "timepoint")) %>% 
+  filter(pathogen == "Giardia") 
+
+# join in the seropositivity and community data; fill in community for NA rows due to 3 month and 15 month missing in serology 
+igg_mfi <- left_join(pcr_mfi %>% ungroup(), 
+                     sero_pos %>% ungroup() %>%
+                       filter(pathogen == "Giardia", antigen == "vsp5") %>%
+                       select(childid, timepoint, pathogen, seropos) %>% 
+                       distinct(),
+                     by = c("childid", "timepoint", "pathogen"))
+
+# join in community 
+igg_mfi <- left_join(igg_mfi, sero_pos %>% distinct(childid, community, community_name, 
+                              community_type2), by = c("childid"))
+ 
+igg_mfi$community_type2 <- factor(igg_mfi$community_type2, levels = c("Esmeraldas City", "Borbon", "Rural"))
+
+ # label seroposivity and GPP positivity 
+igg_mfi <- igg_mfi %>% 
+  mutate(seropos2 = ifelse(seropos == 1, "IgG+", "IgG-")) 
+
+unique(igg_mfi$timepoint)
+
+igg_mfi <- igg_mfi %>% mutate(gpppos = ifelse(pcrpos == 1, "GPP+", "GPP-"))
+table(igg_mfi$gpppos, igg_mfi$seropos2)
+igg_mfi$mfi <- as.numeric(igg_mfi$mfi)
+
+print("Missing data: PCR MFI values")
+igg_mfi %>% 
+  summarise(
+    total_rows = n(),
+    n_mfi_na = sum(is.na(mfi)), 
+    percent_missing = round(n_mfi_na / total_rows * 100, 2)
+  )
+
+# merge in the assay classification 
+igg_mfi <- igg_mfi %>% ungroup() %>% 
+  left_join(assay %>% distinct(childid, pathogen, assay_pos), 
+                     by = c("childid", "pathogen"))
+
+# filter to GPP+ samples
+# assay_pos status was already assigned excluding the 24 month timepoint/end timepoints
+igg_mfi2 <- igg_mfi %>% 
+  filter(pcrpos == 1, 
+         assay_pos == "PCR+ IgG+" | 
+           assay_pos == "PCR+ IgG-")
+
+# duplicate data and label as "Overall"
+igg_mfi_overall <- igg_mfi2 %>%
+  mutate(community_type2 = "Overall")
+
+# combine with original community level data
+igg_mfi_combined <- bind_rows(igg_mfi2, igg_mfi_overall)
+
+# assign levels
+igg_mfi_combined$community_type2 <- 
+  factor(igg_mfi_combined$community_type2, 
+         levels = c("Esmeraldas City", "Borbon", "Rural", "Overall"))
+
+#------------#
+# Code Check #
+#------------#
+
+# total GPP+ results before assay_pos filter
+cat("Total GPP+ results before assay_pos filter")
+igg_mfi %>% filter(pcrpos == 1) %>% nrow()
+
+# GPP+ results after filtering to PCR+ IgG+ and PCR+ IgG- only
+cat("GPP+ results after assay_pos filter")
+igg_mfi2 %>% nrow()
+
+cat("Total GPP+ data excluded")
+(igg_mfi %>% filter(pcrpos == 1) %>% nrow()) - (igg_mfi2 %>% nrow())
+```
+
+#### i) Mann-Whitney U test
+
+```{r}
+# get table of sample distribution 
+igg_mfi2 %>% group_by(timepoint) %>% 
+  filter(gpp_target_pos == "POS") %>% 
+  summarise(n_gpppos = n())
+# note that 24 month GPP+ samples are included if they had a previous GPP+ result
+
+# repeated measures: GPP+ timepoints coded as GPP+ after exclusion criteria applied
+igg_mfi2 %>% group_by(childid) %>% 
+  filter(gpp_target_pos == "POS") %>% 
+  summarise(n_pcrpos = n()) %>% 
+  group_by(n_pcrpos) %>% 
+  summarise(n_children = n())
+
+
+###-------------------------------------------------------------------###
+## Mann-Whitney U test (ignoring repeated measures and community type) ##
+###-------------------------------------------------------------------###
+igg_mfi_combined$assay_pos <- factor(igg_mfi_combined$assay_pos, levels = c("PCR+ IgG-", "PCR+ IgG+"))
+levels(igg_mfi_combined$assay_pos)
+
+cat("Mann Whitney U test, by community, MFI")
+mannwhitney_mfi <- igg_mfi_combined %>%
+  filter(!is.na(mfi), !is.na(assay_pos)) %>%
+  group_by(community_type2) %>%
+  summarise(
+    test = list(tryCatch(
+      wilcox.test(mfi ~ assay_pos, conf.int = TRUE),
+      error = function(e) NULL
+    )),
+    total_n = n(),
+    n_IgG_neg = sum(assay_pos == "PCR+ IgG-"),
+    n_IgG_pos = sum(assay_pos == "PCR+ IgG+")
+  ) %>%
+  mutate(
+    W          = sapply(test, \(x) if (is.null(x)) NA_real_ else as.numeric(x$statistic)),
+    p_value    = sapply(test, \(x) if (is.null(x)) NA_real_ else round(x$p.value, 5)),
+    conf_low   = sapply(test, \(x) if (is.null(x)) NA_real_ else x$conf.int[1]),
+    conf_high  = sapply(test, \(x) if (is.null(x)) NA_real_ else x$conf.int[2])
+  ) %>%
+  select(-test) %>%
+  mutate(p_value_print = case_when(
+    is.na(p_value)   ~ "N/A",
+    p_value < 0.001  ~ "p < 0.001",
+    TRUE             ~ paste0("p = ", sprintf("%1.3f", p_value))
+  ))
+
+mannwhitney_mfi
+```
+
+#### ii) MFI plot
+
+```{r}
+set.seed(12335) # set seed for consistent jitter
+
+gpp_giardia <- ggplot(
+  igg_mfi_combined,
+  aes(x = assay_pos, y = log10(mfi))
+) + 
+  geom_boxplot(notch = FALSE, outlier.shape = NA) +
+  geom_jitter(
+    aes(color = community_type2),
+    alpha = 0.75, position = position_jitter(width = 0.2, height = 0, seed = 12345)
+  ) + 
+  geom_hline(yintercept = log10(200), color = "black", linetype = "dashed") +
+  geom_text(data = mannwhitney_mfi, aes(x = 1.5, y = 4, label = p_value_print)) + 
+  facet_grid(~ community_type2) +
+  scale_y_continuous(
+    limits = c(2, 4),
+    breaks = seq(2, 4, 0.5)
+  ) +
+  scale_x_discrete(labels = c("IgG-", "IgG+")) +
+  scale_color_manual(
+    values = c(
+      "Esmeraldas City" = nytpal[1],
+      "Borbon" = nytpal[2],
+      "Rural" = nytpal[3],
+      "Overall" = "gray30"
+    )
+  ) +
+  theme_classic() +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = "none"
+  ) + 
+  labs(
+    subtitle = "Giardia MFI values for PCR positive samples by Luminex GPP (ages 3, 9, 15, 24 months)",
+    y = "Luminex log10(MFI)", x = "child seroconversion status"
+  )
+
+gpp_giardia <- gpp_giardia +
+  labs(tag = "B)") +
+  theme(
+    plot.tag = element_text(size = 14, face = "bold"),
+    plot.tag.position = c(0.01, 1)
+  )
+
+gpp_giardia
+```
+
+### C) Aggregate figure: tac and gpp
+
+```{r fig.height = 7, fig.width = 6}
+agg_giardia <- plot_grid(tac_giardia, gpp_giardia, ncol = 1)
+agg_giardia
+
+ggsave(here("figures/supp_giardia_mfi_ct_byurbanicity_8panel.tiff"), agg_giardia, device = "tiff", height = 180, width = 200, units = "mm")
+```

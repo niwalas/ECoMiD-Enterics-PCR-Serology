@@ -1,0 +1,615 @@
+---
+title: "ECoMiD: measure of association figure generation"
+author: "Nikolina Walas (nikolina.walas@ucsf.edu) and Juilanna Colado (juliannacolado@berkeley.edu)"
+date: "updated: `r Sys.time()`"
+format:
+  html:
+    self-contained: true
+    toc: true
+    embed-resources: true
+    code-fold: true
+    link-external-newwindow: true
+
+execute:
+  echo: true
+---
+
+## Overview
+
+The purpose of this file is to create a large / aggregated figure for the manuscript that includes 4 panes per pathogen (raw SCR, SCRR, raw PCR Prevalence, PCRPrevR) across community types. Data used in the plots is generated in the pcr-serology workflow.
+
+## Set up
+
+Load data and packages
+
+```{r}
+library(here)
+library(purrr)
+source(here("R", "0-config.R"))
+```
+
+### Read in files
+
+```{r}
+#----------------
+# Summary tables
+#----------------
+# seroconversion by community type + pathogen
+sero_inc <- readRDS(here("output/ecomid_pathogen_comm_sero_inc_3_levels.rds"))
+sero_inc$community_type2 <- factor(sero_inc$community_type2, levels = c("Esmeraldas", "Borbon", "Rural"))
+
+# pcr prevalence by community type + pathogen
+pcr_prev <- readRDS(here("output/ecomid_pcr_prev_by_community_3_levels.rds"))
+pcr_prev$community_type2 <- factor(pcr_prev$community_type2, levels = c("Esmeraldas", "Borbon", "Rural"))
+
+#-----------------
+# Measures of Association
+#-----------------
+# RR
+scrr <- readRDS(here("output/ecomid_scrr.rds"))
+
+# RR
+prevr <- readRDS(here("output/ecomid_pr.rds"))
+
+
+# set margins for the plots in the following code chunks
+small_margins <- theme(
+  plot.margin = margin(0, 0, 0, 0),  # top, right, bottom, left; 
+  panel.spacing.y = unit(-2, "pt")
+)
+
+```
+
+### 1) Seroconversion rate plots
+
+```{r}
+####--------------------------------####
+####--------SCR PLOTS---------------####
+####--------------------------------####
+
+# get vector of unique pathogen names
+pathogens <- unique(sero_inc$pathogen)
+pathogens_clean <- str_replace_all(pathogens, " ", "_")
+# create a named list of plots, one per pathogen
+plot_list <- map(pathogens, function(p){
+
+  sero_inc %>%
+    filter(pathogen == p) %>%
+    ggplot(aes(x = community_type2, y = ir_per_100, color = community_type2)) +
+    geom_point() + 
+    labs(
+      y = "SCR (per 100 py)",
+      x = "",
+      title = paste(p) # title for the entire plot panel 
+    ) +
+    scale_color_manual(values = nytpal) +
+    theme(
+      #plot.title = element_text(hjust = -Inf), 
+      axis.text.x = element_blank(),
+      legend.position = "right",
+      panel.background = element_rect(fill = "white"),
+      panel.grid = element_line(color = "grey", linewidth = 0.1), 
+      plot.margin = margin(0, 0, 0, 0),
+      panel.spacing.y = unit(0, "pt"),
+      strip.background = element_blank(),
+      strip.text = element_text(margin = margin(0, 0, 0, 0))
+    ) +
+    geom_errorbar(aes(ymin = ir_lo_per_100, ymax = ir_hi_per_100), width = 0.1, linewidth = 0.5) + theme(
+        axis.text.x = element_blank(),
+        text = element_text(size = 12),
+        legend.position = "none"
+      ) +
+  coord_fixed(ratio = 0.02, ylim = c(0, 200))  + small_margins
+
+}) 
+
+# name each list element using scr_[pathogen]
+names(plot_list) <- paste0("scr_", pathogens_clean)
+
+# Optionally assign each plot as an object in the global environment:
+list2env(plot_list, envir = .GlobalEnv)
+
+scr_Salmonella
+`scr_Shigella/EIEC`
+```
+
+### 2) PCR Prevalence Plots
+
+```{r}
+####--------------------------------####
+####--------Prev PLOTS--------------####
+####--------------------------------####
+# get the unique pathogens
+pathogens <- unique(pcr_prev$pathogen)
+pathogens_clean <- str_replace_all(pathogens, " ", "_")
+# create a plot for each pathogen
+pcr_plot_list <- map(pathogens, function(p){
+
+  pcr_prev %>%
+    filter(pathogen == p) %>%
+    ggplot(aes(x = community_type2, y = pcr_prevalence*100, color = community_type2,)) +
+    geom_point() + 
+    labs(
+      y = "PCR Prevalence",
+      x = ""
+      #title = paste("PCR Prevalence:", p)
+    ) +
+    scale_color_manual(values = nytpal) + 
+    theme(
+      axis.text.x = element_blank(),
+      legend.position = "none", 
+      panel.background = element_rect(fill = "white"),
+      panel.grid = element_line(color = "grey", linewidth = 0.1), 
+       plot.margin = margin(0, 0, 0, 0),
+      panel.spacing.y = unit(0, "pt"),
+      strip.background = element_blank(),
+      strip.text = element_text(margin = margin(0, 0, 0, 0))
+    ) +
+    geom_errorbar(aes(ymin = lower_ci*100, ymax = upper_ci*100), 
+                  width = 0.1, linewidth = 0.5) +
+  coord_fixed(ratio = 0.13, ylim = c(0, 30)) + small_margins  # equal height/width scaling
+  
+})
+
+# name the plots like pcr_[pathogen]
+names(pcr_plot_list) <- paste0("pcr_", pathogens_clean)
+
+# optionally push all plots into the global environment
+list2env(pcr_plot_list, envir = .GlobalEnv)
+
+```
+
+### 3) SCR Ratio
+
+```{r}
+# Get list of unique pathogens
+pathogens <- unique(scrr$pathogen)
+
+# Clean pathogen names so object names have no spaces
+pathogens_clean <- str_replace_all(pathogens, " ", "_")
+
+# Create a plot for each pathogen
+scrr_plot_list <- map(pathogens, function(p){
+
+  scrr %>%  
+    filter(pathogen == p) %>% 
+    mutate(
+      community = case_when(
+        term == "(Intercept)" ~ "Esmeraldas", 
+        term == "community_typeBorbon" ~ "Borbon",
+        term == "community_typeRural"  ~ "Rural",
+        TRUE ~ NA_character_
+      ),
+      # Force x-axis levels (Esmeraldas stays even if dropped from plot)
+      community = factor(community, 
+                         levels = c("Esmeraldas", "Borbon", "Rural"))
+    ) %>%
+    
+    # REMOVE "Esmeraldas" from data so it does not plot  
+    filter(community != "Esmeraldas") %>%
+    
+    ggplot(aes(x = community, color = community, group = community)) +
+      geom_errorbar(aes(ymin = conf.low, ymax = conf.high),
+                    position = position_dodge(width = 0.6),
+                    width = 0.1) +
+      geom_point(aes(y = estimate),
+                 position = position_dodge(width = 0.6),
+                 size = 2) +
+      
+      # FREE Y-AXIS (removed coord_cartesian)
+      # ggplot will choose appropriate limits
+      
+      scale_color_manual(values = nytpal[c(2, 3)]) +
+      
+      scale_y_continuous(expand = c(0, 0), limits = c(0, NA)) +
+    scale_x_discrete(drop = FALSE) +
+      
+      geom_hline(yintercept = 1, linetype = "dotted", color = "black") +
+      
+      labs(
+        x = "",
+        y = "RR",
+        color = "Community"
+        #title = paste("SCRR:", p),
+      ) +
+      
+      theme_minimal() +
+      theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size = 12),
+        legend.position = "none", 
+         plot.margin = margin(0, 0, 0, 0),
+      panel.spacing.y = unit(0, "pt"),
+      strip.background = element_blank(),
+      strip.text = element_text(margin = margin(0, 0, 0, 0))) + 
+    coord_fixed(ratio = 1.2, ylim = c(0, 3.5)) 
+})
+
+# Name each plot object scrr_[pathogen]
+names(scrr_plot_list) <- paste0("scrr_", pathogens_clean)
+
+# Save each plot into the global environment
+list2env(scrr_plot_list, envir = .GlobalEnv)
+
+
+# Need to manually make one for E. histolytica due to range being wide 
+
+scrr_E._histolytica <-  scrr %>%  
+    filter(pathogen == "E. histolytica") %>% 
+    mutate(
+      community = case_when(
+        term == "(Intercept)" ~ "Esmeraldas", 
+        term == "community_typeBorbon" ~ "Borbon",
+        term == "community_typeRural"  ~ "Rural",
+        TRUE ~ NA_character_
+      ),
+      # Force x-axis levels (Esmeraldas stays even if dropped from plot)
+      community = factor(community, 
+                         levels = c("Esmeraldas", "Borbon", "Rural"))
+    ) %>%
+    
+    # REMOVE "Esmeraldas" from data so it does not plot  
+    filter(community != "Esmeraldas") %>%
+    
+    ggplot(aes(x = community, color = community, group = community)) +
+      geom_errorbar(aes(ymin = conf.low, ymax = conf.high),
+                    position = position_dodge(width = 0.6),
+                    width = 0.1) +
+      geom_point(aes(y = estimate),
+                 position = position_dodge(width = 0.6),
+                 size = 2) +
+      
+      scale_color_manual(values = nytpal[c(2, 3)]) +
+      scale_y_continuous(expand = c(0, 0), limits = c(0, NA)) +
+    scale_x_discrete(drop = FALSE) +
+      
+      geom_hline(yintercept = 1, linetype = "dotted", color = "black") +
+      
+      labs(
+        x = "",
+        y = "RR",
+        color = "Community"
+        #title = paste("SCRR:", p),
+      ) +
+      
+      theme_minimal() +
+      theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size = 12),
+        legend.position = "none"
+      ) + 
+    coord_fixed(ratio = 0.25, ylim = c(0, 18)) + small_margins
+
+```
+
+### 4) PCR Prevalence Ratio
+
+```{r}
+# Get list of unique pathogens
+pathogens <- unique(prevr$pathogen)
+
+# Clean pathogen names so object names have no spaces
+pathogens_clean <- str_replace_all(pathogens, " ", "_")
+
+# Create a plot for each pathogen
+pr_plot_list <- map(pathogens, function(p){
+
+  prevr %>%  
+    filter(pathogen == p) %>% 
+    mutate(
+      community = case_when(
+        term == "(Intercept)" ~ "Esmeraldas", 
+        term == "community_typeBorbon" ~ "Borbon",
+        term == "community_typeRural"  ~ "Rural",
+        TRUE ~ NA_character_
+      ),
+      # Force x-axis levels (Esmeraldas stays even if dropped from plot)
+      community = factor(community, 
+                         levels = c("Esmeraldas", "Borbon", "Rural"))
+    ) %>%
+    
+    # REMOVE "Esmeraldas" from data so it does not plot  
+    filter(community != "Esmeraldas") %>%
+    
+    ggplot(aes(x = community, color = community, group = community)) +
+      geom_errorbar(aes(ymin = conf.low, ymax = conf.high),
+                    position = position_dodge(width = 0.6),
+                    width = 0.1) +
+      geom_point(aes(y = estimate),
+                 position = position_dodge(width = 0.6),
+                 size = 2) +
+      
+      # FREE Y-AXIS (removed coord_cartesian)
+      # ggplot will choose appropriate limits
+      
+      scale_color_manual(values = nytpal[c(2, 3)]) +
+      
+      scale_y_continuous(expand = c(0, 0), limits = c(0, NA)) +
+    scale_x_discrete(drop = FALSE) +
+      
+      geom_hline(yintercept = 1, linetype = "dotted", color = "black") +
+      
+      labs(
+        x = "",
+        y = "PR",
+        color = "Community"
+        #title = paste("PR:", p)
+      ) +
+      
+      theme_minimal() +
+      theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size = 12),
+        legend.position = "none", 
+         plot.margin = margin(0, 0, 0, 0),
+      panel.spacing.y = unit(0, "pt"),
+      strip.background = element_blank(),
+      strip.text = element_text(margin = margin(0, 0, 0, 0))) + 
+    coord_fixed(ratio = 1.2, ylim = c(0, 3.5)) + small_margins
+      
+})
+
+# Name each plot object scrr_[pathogen]
+names(pr_plot_list) <- paste0("prevr_", pathogens_clean)
+
+# Save each plot into the global environment
+list2env(pr_plot_list, envir = .GlobalEnv)
+
+`prevr_LT-ETEC`
+
+# Manually do one for E. histolytica #
+prevr_E._histolytica <- prevr %>%  
+    filter(pathogen == "E. histolytica") %>% 
+    mutate(
+      community = case_when(
+        term == "(Intercept)" ~ "Esmeraldas", 
+        term == "community_typeBorbon" ~ "Borbon",
+        term == "community_typeRural"  ~ "Rural",
+        TRUE ~ NA_character_
+      ),
+      # Force x-axis levels (Esmeraldas stays even if dropped from plot)
+      community = factor(community, 
+                         levels = c("Esmeraldas", "Borbon", "Rural"))
+    ) %>%
+    
+    # REMOVE "Esmeraldas" from data so it does not plot  
+    filter(community != "Esmeraldas") %>%
+    
+    ggplot(aes(x = community, color = community, group = community)) +
+      geom_errorbar(aes(ymin = conf.low, ymax = conf.high),
+                    position = position_dodge(width = 0.6),
+                    width = 0.1) +
+      geom_point(aes(y = estimate),
+                 position = position_dodge(width = 0.6),
+                 size = 2) +
+      
+      # FREE Y-AXIS (removed coord_cartesian)
+      # ggplot will choose appropriate limits
+      
+      scale_color_manual(values = nytpal[c(2, 3)]) +
+      
+      scale_y_continuous(expand = c(0, 0), limits = c(0, NA)) +
+    scale_x_discrete(drop = FALSE) +
+      
+      geom_hline(yintercept = 1, linetype = "dotted", color = "black") +
+      
+      labs(
+        x = "",
+        y = "PR",
+        color = "Community"
+        #title = paste("PR:", p)
+      ) +
+      
+      theme_minimal() +
+      theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size = 12),
+        legend.position = "none") + 
+    coord_fixed(ratio = 1.0, ylim = c(0, 4.5)) + small_margins
+
+```
+
+### 5) Merge the plots
+
+\*Decided to just manually make the composite figure as was running into issues doing it in a loop
+
+```{r}
+# Get name of overlapping pathogens 
+names <- sero_inc %>% filter(sero_inc$pathogen %in% pcr_prev$pathogen)
+unique(names$pathogen)
+library(patchwork)
+
+# 1) Camplobacter
+camp <- (scr_Campylobacter + pcr_Campylobacter) / (scrr_Campylobacter + prevr_Campylobacter) + plot_layout(heights = c(1, 1)) &
+  theme(
+    plot.margin = margin(0, 0, 0, 0),
+    plot.spacing = unit(0, "pt")
+  )
+#ggsave(here("figures/camp_composite.tiff"), camp, height = 5, width = 4)
+
+# 2) LT-ETEC
+ltetec <- (`scr_LT-ETEC` + `pcr_LT-ETEC`) / (`scrr_LT-ETEC` + `prevr_LT-ETEC`) + plot_layout(heights = c(1, 1)) &
+  theme(
+    plot.margin = margin(0, 0, 0, 0),
+    plot.spacing = unit(0, "pt")
+  )
+ltetec
+#ggsave(here("figures/ltetec_composite.tiff"), ltetec, height = 5, width = 4)
+
+# 3) Shigella
+shig <- (`scr_Shigella/EIEC` + `pcr_Shigella/EIEC`) / (`scrr_Shigella/EIEC` + `prevr_Shigella/EIEC`) +
+   plot_layout(heights = c(1, 1)) &
+  theme(
+    plot.margin = margin(0, 0, 0, 0),
+    plot.spacing = unit(0, "pt")
+  )
+#ggsave(here("figures/shigella_composite.tiff"), shig, height = 5, width = 4)
+
+# 4) Norovirus GI
+noro1 <- (scr_Norovirus_GI + pcr_Norovirus_GI) / (scrr_Norovirus_GI + prevr_Norovirus_GI) +
+   plot_layout(heights = c(1, 1)) &
+  theme(
+    plot.margin = margin(0, 0, 0, 0),
+    plot.spacing = unit(0, "pt")
+  )
+noro1
+#ggsave(here("figures/noro1_composite.tiff"), noro1, height = 5, width = 4)
+
+# 5) Cryptosporidium
+cryp <- (scr_Cryptosporidium + pcr_Cryptosporidium) / (scrr_Cryptosporidium + prevr_Cryptosporidium) +  plot_layout(heights = c(1, 1)) &
+  theme(
+    plot.margin = margin(0, 0, 0, 0),
+    plot.spacing = unit(0, "pt")
+  )
+cryp
+#ggsave(here("figures/cryp_composite.tiff"), cryp, height = 5, width = 4)
+
+# 6) E. histolytica
+ehist <- (scr_E._histolytica + pcr_E._histolytica) / (scrr_E._histolytica + prevr_E._histolytica) +  plot_layout(heights = c(1, 1)) &
+  theme(
+    plot.margin = margin(0, 0, 0, 0),
+    plot.spacing = unit(0, "pt")
+  )
+ehist
+#ggsave(here("figures/ehist_composite.tiff"), ehist, height = 5, width = 4)
+
+# 7) Giardia
+giardia <- (scr_Giardia + pcr_Giardia) / (scrr_Giardia + prevr_Giardia) +  plot_layout(heights = c(1, 1)) &
+  theme(
+    plot.margin = margin(0, 0, 0, 0),
+    plot.spacing = unit(0, "pt")
+  )
+giardia
+#ggsave(here("figures/giardia_composite.tiff"), giardia, height = 5, width = 4)
+
+# 8) Norovirus GII
+noro2 <- (scr_Norovirus_GII + pcr_Norovirus_GII) / (scrr_Norovirus_GII + prevr_Norovirus_GII) +  plot_layout(heights = c(1, 1)) &
+  theme(
+    plot.margin = margin(0, 0, 0, 0),
+    plot.spacing = unit(0, "pt")
+  )
+noro2
+
+# 9) Salmonella
+sal <- (scr_Salmonella + pcr_Salmonella) / (scrr_Salmonella + prevr_Salmonella) +  plot_layout(heights = c(1, 1)) &
+  theme(
+    plot.margin = margin(0, 0, 0, 0),
+    plot.spacing = unit(0, "pt")
+  )
+sal
+
+
+#ggsave(here("figures/noro2_composite.tiff"), noro2, height = 5, width = 4)
+
+```
+
+### 6) Create master figures
+
+```{r}
+library(patchwork)
+plot_list <- list(ltetec, shig, camp, noro2, cryp, giardia, ehist, noro1)
+
+master <- wrap_plots(plot_list, ncol = 4) +       # 4 columns
+  plot_layout(guides = "collect") 
+# Save
+#ggsave(
+#  filename = "../figures/figure1_large_horizontal.tiff",
+#  plot = master,
+#  width = 15, #23
+#  height = 11, #15
+#  dpi = 300
+#)
+
+master
+
+```
+
+### 7) Master figure for ...
+
+#### A) Bacteria
+
+```{r}
+plot_list <- list(ltetec, shig, camp)
+
+master_b <- wrap_plots(plot_list, ncol = 3) +       # 4 columns
+  plot_layout(guides = "collect") &
+  theme(
+    plot.margin = margin(0, 0, 0, 0),
+    plot.spacing = unit(0, "pt")
+  )
+  
+# Save
+#ggsave(
+#  filename = "../figures/figure1a_large_horizontal_bacteria.tiff",
+#  plot = master_b,
+#  width = 10, #23
+#  height = 5, #15
+#  dpi = 300
+#)
+
+master_b
+
+```
+
+#### B) Protozoa
+
+```{r}
+plot_list <- list(cryp, giardia, ehist)
+
+master_p <- wrap_plots(plot_list, ncol = 3) +       # 4 columns
+  plot_layout(guides = "collect") &
+  theme(
+    plot.margin = margin(0, 0, 0, 0)
+  )
+# Save
+#ggsave(
+#  filename = "../figures/figure1a_large_horizontal_protozoa.tiff",
+#  plot = master_p,
+#  width = 10, #23
+#  height = 5, #15
+#  dpi = 300
+#)
+
+master_p
+```
+
+#### C) Virus + Salmonella (for balance)
+
+```{r}
+plot_list <- list(noro2, noro1, sal)
+
+master_v <- wrap_plots(plot_list, ncol = 3) +       
+  plot_layout(guides = "collect") 
+# Save
+#ggsave(
+#  filename = "../figures/figure1a_large_horizontal_virus.tiff",
+#  plot = master_v,
+#  width = 10, #23
+#  height = 5, #15
+#  dpi = 300
+#)
+
+master_v
+```
+
+### 8) Vertical master
+
+```{r}
+layout <- c(
+  area(t = 1, l = 1, b = 1, r = 3),   # master_b: full 3 columns
+  area(t = 2, l = 1, b = 2, r = 3),   # master_p: full 3 columns
+  area(t = 3, l = 1, b = 3, r = 3)    # master_v: full 3 columns to add in Salmonella
+)
+
+vert <- master_p / master_b / master_v + 
+  plot_layout(design = layout)
+
+vert
+ggsave(
+  filename = "../figures/moa_large_vertical.tiff",
+  plot = vert,
+  width = 10, #23
+  height = 13, #15
+  dpi = 300
+)
+```
