@@ -119,6 +119,12 @@ Render each `.qmd` file using Quarto or RStudio. The working directory should be
 
 ---
 
+## OSF Repository
+
+> https://doi.org/10.17605/OSF.IO/HDE8K
+
+---
+
 ## License
 
 This code is released under the MIT License. See `LICENSE` for details.
