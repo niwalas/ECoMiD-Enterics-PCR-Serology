@@ -1,0 +1,242 @@
+---
+title: "EcoMID: PCR prevalence"
+subtitle: "PCR prevalence by GPP and TAC assay"
+author: "Nikolina Walas (nikolina.walas@ucsf.edu) and Juilanna Colado (juliannacolado@berkeley.edu)"
+date: "updated: `r Sys.time()`"
+format:
+  html:
+    self-contained: true
+    toc: true
+    embed-resources: true
+    code-fold: true
+    link-external-newwindow: true
+execute: 
+  echo: true
+---
+
+## File Overview
+
+This file summarizes the prevalence of 12 enteric pathogens, as measured by the GPP and TAC assays for the ecomid birth cohort. It was updated 2025/10/21 to include the 15 month timepoint from the GPP assay.
+
+There are 484 unique children in the most recent dataset.
+There are 2503 unique samples per pathogen. 
+
+There is data for 3, 6, 9, 12, 15, 18, 24 month samples.
+
+It is important to note there is only TAC-PCR data available for Salmonella. This pathogen is only measured at 6, 12, 18 months.
+
+### Load packages
+
+```{r}
+library("here")
+source(here("R", "0-config.R"))
+```
+
+### Read in files
+
+```{r}
+# read in data
+data <- read_rds(here("data/ecomid_pcr_analysis_data_2026-06-11.rds"))
+
+# overview of unique childids in most recent file
+print("Unique childid's")
+unique(data$childid) %>% length()
+
+print("Unique sampleid's")
+unique(data$sample_ID) %>% length()
+
+# overview of timepoints in most recent file
+print("timepoints")
+unique(data$visitf)
+print("unique childid's per time point")
+data %>% distinct(visitf, childid) %>% group_by(visitf) %>% summarise(n = n())
+```
+
+## Prevalence by pathogen
+
+```{r}
+prev_overall <- data %>%
+  group_by(pathogen) %>%
+  summarise(
+    n_pos = sum(pcrpos, na.rm = TRUE),
+    n_total = sum(!is.na(pcrpos)),
+    prevalence = n_pos / n_total
+  ) %>%
+  arrange(desc(prevalence))
+
+prev_overall
+```
+
+## Prevalence per community
+
+```{r}
+prev_by_community <- data %>%
+  group_by(pathogen, community_name) %>%
+  summarise(
+    n_pos = sum(pcrpos, na.rm = TRUE),
+    n_total = sum(!is.na(pcrpos)),
+    prevalence = n_pos / n_total
+  ) %>%
+  arrange(pathogen, desc(prevalence))
+prev_by_community
+
+```
+
+## Robust SE by pathogen
+
+```{r}
+robust_prev_overall <- data %>%
+  group_by(pathogen) %>%
+  group_map(~{
+    model <- glm(pcrpos ~ 1, family = binomial(), data = .x)
+    se <- sqrt(diag(vcovCL(model, cluster = .x$childid)))[1]
+    est <- coef(model)[1]
+    
+    tibble(
+      pathogen = .y$pathogen,
+      prevalence = plogis(est),
+      lower_ci = plogis(est - 1.96 * se),
+      upper_ci = plogis(est + 1.96 * se),
+      n = nrow(.x)
+    )
+  }) %>%
+  bind_rows()
+
+final_prev_overall <- prev_overall %>%
+  left_join(robust_prev_overall, by = "pathogen") %>%
+  select(-prevalence.y) %>%          # remove duplicate
+  select(-n) %>%                     # remove duplicate
+  rename(prevalence = prevalence.x) %>%
+  arrange(pathogen)
+
+final_prev_overall
+```
+
+## Robust SE by pathogen & community
+
+```{r}
+robust_prev_by_community <- data %>%
+  group_by(pathogen, community_name) %>%
+  group_map(~{
+    model <- glm(pcrpos ~ 1, family = binomial(), data = .x)
+    se <- sqrt(diag(vcovCL(model, cluster = .x$childid)))[1]
+    est <- coef(model)[1]
+    
+    tibble(
+      pathogen = .y$pathogen,
+      community_name = .y$community_name,
+      prevalence = plogis(est),
+      lower_ci = plogis(est - 1.96 * se),
+      upper_ci = plogis(est + 1.96 * se),
+      n = nrow(.x)
+    )
+  }) %>%
+  bind_rows()
+
+final_prev_by_community <- prev_by_community %>%
+  left_join(robust_prev_by_community, by = c("pathogen", "community_name")) %>%
+  select(-prevalence.y) %>%     # remove duplicates
+  select(-n) %>%                # remove duplicates
+  rename(prevalence = prevalence.x) %>%
+  arrange(pathogen, community_name)
+  
+
+```
+
+## Format
+
+Stack final_prev_overall & final_prev_by_community
+
+Save RDS/CVS
+
+```{r}
+# reformat for final export
+final_prev_overall$community_name <- "All communities"
+
+# final prevalence table 
+final_prev_overall <- final_prev_overall %>%
+  select(pathogen, community_name, n_pos, n_total, prevalence, lower_ci, upper_ci) 
+
+# final prevalence table 
+saveRDS(final_prev_overall, file = paste0("../output/ecomid_pcr_prev_by_pathogen.rds"))
+write.csv(final_prev_overall, file = paste0("../output/ecomid_pcr_prev_by_pathogen.csv"))
+
+# recode to include community type and pathogen label that is same as serology datasets
+combined_df <- rbind(final_prev_overall, final_prev_by_community) %>% rename(pcr_prevalence = prevalence) %>% 
+  mutate(community_type = case_when(community_name == "Esmeraldas" ~ "Esmeraldas",
+      community_name %in% c("Maldonado", "Colon Eloy", "Timbire", "Selva Alegre") ~ 
+        "Rural Road",
+      community_name %in% c("Zancudo", "Colon de Onzole", "Santo Domingo", "San Francisco") ~ 
+        "Rural River",
+      community_name == "Borbon" ~ "Borbon", 
+      TRUE ~ "All communities"))
+
+# view output
+combined_df %>%   
+  kable("html", 
+        caption = "Prevalence by pathogen and community", 
+        align = "c") %>%      # center-align columns
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width = FALSE,
+    position = "center"
+  ) %>%
+  row_spec(0, bold = TRUE, background = "#D3D3D3") %>% # header row styling
+  column_spec(1, bold = TRUE, border_right = TRUE)  
+
+saveRDS(combined_df, file = paste0("../output/ecomid_pcr_prev_by_community.rds"))
+write.csv(combined_df, file = paste0("../output/ecomid_pcr_prev_by_community.csv"))
+
+```
+
+## Recalculations of 3-level community (Rural, Esmereldas, and Borbon) scale
+
+### Prevalence per community (3-level)
+
+```{r}
+# recode data to 3 level community scale 
+data2 <- data %>% mutate(community_type2 = case_when(
+      community_name == "Esmeraldas" ~ "Esmeraldas",
+      community_name == "Borbon" ~ "Borbon",
+      community_name %in% c("Maldonado", "Colon Eloy", "Timbire", "Zancudo", "Selva Alegre", "Zancudo", "Colon de Onzole", "Santo Domingo", "San Francisco") ~ "Rural"))
+
+# prevalence 
+prev_by_community2 <- data2 %>%
+  group_by(pathogen, community_type2) %>%
+  summarise(
+    n_pos = sum(pcrpos, na.rm = TRUE),
+    n_total = sum(!is.na(pcrpos)),
+    prevalence = n_pos / n_total
+  ) %>%
+  arrange(pathogen, desc(prevalence))
+
+# robust se prevalence
+robust_prev_by_community2 <- data2 %>%
+  group_by(pathogen, community_type2) %>%
+  group_map(~{
+    model <- glm(pcrpos ~ 1, family = binomial(), data = .x)
+    se <- sqrt(diag(vcovCL(model, cluster = .x$childid)))[1]
+    est <- coef(model)[1]
+    
+    tibble(
+      pathogen = .y$pathogen,
+      community_type2 = .y$community_type2,
+      prevalence = plogis(est),
+      lower_ci = plogis(est - 1.96 * se),
+      upper_ci = plogis(est + 1.96 * se),
+      n = nrow(.x)
+    )
+  }) %>%
+  bind_rows()
+
+final_prev_by_community2 <- prev_by_community2 %>%
+  left_join(robust_prev_by_community2, by = c("pathogen", "community_type2")) %>%
+  select(-prevalence.y) %>%     # remove duplicates
+  select(-n) %>%                # remove duplicates
+  rename(pcr_prevalence = prevalence.x) %>%
+  arrange(pathogen, community_type2)
+
+saveRDS(final_prev_by_community2, file = paste0("../output/ecomid_pcr_prev_by_community_3_levels.rds"))
+write.csv(final_prev_by_community2, file = paste0("../output/ecomid_pcr_prev_by_community_3_levels.csv"))
+  
+```

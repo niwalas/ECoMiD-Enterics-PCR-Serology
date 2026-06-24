@@ -1,0 +1,348 @@
+---
+title: "EcoMID serology"
+subtitle: "Create a map of population density"
+author: "Ben Arnold (ben.arnold@ucsf.edu) and Niko Walas (nikolina.walas@ucsf.edu)"
+date: "updated: `r Sys.time()`"
+format:
+  html:
+    
+    toc: true
+    embed-resources: true
+    code-fold: true
+    link-external-newwindow: true
+---
+
+# Summary
+
+Download WorldPop population density raster at 100m resolution for 2022 (midpoint of the cohort). Create a map with the study villages indicated. 
+
+
+# Preamble
+
+```{r}
+#| label: preamble
+#| message: FALSE
+#| 
+library(here)
+here()
+#----------------------------
+# source the config file
+#----------------------------
+source(here("R","0-config.R"))
+
+# load geospatial packages (keep separate from config file as they conflict with other packages)
+library(sf)
+library(raster)
+library(ggspatial)
+library(rnaturalearth) 
+
+
+#------------------------------------
+# raster_to_tibble()
+#------------------------------------
+#' Transform raster as data.frame to be later used with ggplot
+#' Modified from rasterVis::gplot
+#' From: https://stackoverflow.com/questions/47116217/overlay-raster-layer-on-map-in-ggplot2-in-r
+#'
+#' @param x A Raster* object
+#' @param maxpixels Maximum number of pixels to use
+#'
+#' @details rasterVis::gplot is nice to plot a raster in a ggplot but
+#' if you want to plot different rasters on the same plot, you are stuck.
+#' If you want to add other information or transform your raster as a
+#' category raster, you can not do it. With `SDMSelect::gplot_data`, you retrieve your
+#' raster as a tibble that can be modified as wanted using `dplyr` and
+#' then plot in `ggplot` using `geom_tile`.
+#' If Raster has levels, they will be joined to the final tibble.
+#'
+#' @export
+
+raster_to_tibble <- function(x, maxpixels = 50000)  {
+  x <- raster::sampleRegular(x, maxpixels, asRaster = TRUE)
+  coords <- raster::xyFromCell(x, seq_len(raster::ncell(x)))
+  ## Extract values
+  dat <- utils::stack(as.data.frame(raster::getValues(x))) 
+  names(dat) <- c('value', 'variable')
+  
+  dat <- tibble::as_tibble(data.frame(coords, dat))
+  
+  if (!is.null(levels(x))) {
+    dat <- dplyr::left_join(dat, levels(x)[[1]], 
+                            by = c("value" = "ID"))
+  }
+  return(dat)
+}
+
+```
+
+# Download WorldPop 2022 data
+
+
+```{r}
+#| label:  load worldpop data
+
+
+#-------------------------------
+# download the WorldPop Raster
+# for 2020 population density
+# 1 km resolution
+#-------------------------------
+# download the raster
+# 2022 data 100m resolution
+# download.file(url = "https://data.worldpop.org/GIS/Population/Global_2015_2030/R2025A/2022/ECU/v1/100m/constrained/ecu_pop_2022_CN_100m_R2025A_v1.tif", destfile = here("data","ecu_pop_2022_CN_100m_R2025A_v1.tif"), mode = "wb")
+
+# download.file(url = "https://data.worldpop.org/GIS/Population_Density/Global_2000_2020_1km/2020/ECU/ecu_pd_2020_1km.tif", destfile = here("data/geodata","ecu_pd_2020_1km.tif"), mode = "wb")
+```
+# Load geodata
+
+```{r}
+#| label: load administrative boundaries
+
+d_adm0 <- st_read(here("data/geodata/ecu_adm_2024","ecu_adm_adm0_2024.shp"))
+
+d_adm1 <- st_read(here("data/geodata/ecu_adm_2024","ecu_adm_adm1_2024.shp"))
+
+d_adm <- st_read(here("data/geodata/ecu_adm_2024","ecu_adm_adm2_2024.shp"))
+# Filter to Esmeraldas province
+d_adm2 <- d_adm %>%
+  filter(ADM1_ES == "Esmeraldas")
+
+```
+
+```{r}
+#| label: load community points
+
+#----------------------------
+# load community lon/lat
+# note: latitutde and longitude
+# are backwards!  fix
+#----------------------------
+dgps <- read_csv(here("../../data/geospatial","ECoMiD_communities_GPS.csv")) %>%
+  rename(lon = Lat, lat = Lon)
+
+#----------------------------
+# create sf object
+#----------------------------
+dgps_sf <- dgps %>%
+  st_as_sf(coords = c("lon", "lat"), crs = 4326)
+```
+
+
+```{r}
+#| label: load worldpop raster
+# load the raster
+dpop <- raster(here("data/geodata","ecu_pd_2020_1km.tif"))
+# crop the raster
+
+dpop_crop <- crop(dpop,d_adm2)
+dpop_mask <- mask(dpop_crop,d_adm2)
+dpop_plot  <- raster_to_tibble(dpop_mask) %>%
+  # truncate at 200 persons / sq km
+  mutate(pdens = ifelse(value>200,200,value))
+
+bbox_coords <- as.vector(bbox(dpop_mask))
+names(bbox_coords) <- c("xmin","ymin","xmax","ymax")
+dpop_bbox <- st_as_sf(st_as_sfc(st_bbox(bbox_coords)), crs=4326)
+```
+
+```{r}
+#| label: load river polygon
+
+d_riv <- st_read(here("data/geodata","hotosm_ecu_waterways_lines_shp"))
+
+d_riv2 <- d_riv %>%
+  # filter(name %in% c("Rio Cayapas","Rio Santiago","San Francisco")) %>%
+  st_intersection(d_adm2)
+
+```
+
+
+
+# Create map
+## 1) Map of Ecuador/South America 
+```{r}
+#| label: create map of Ecuador
+#-------------------------------
+# plot Ecuador
+#-------------------------------
+
+# get names of countries
+sa <- ne_countries(
+  continent = "South America",
+  scale = "medium",
+  returnclass = "sf"
+)
+
+# subselect for countries that will be in smaller map view
+sa_sel <- sa %>%
+  filter(name_long %in% c(
+    "Brazil", "Ecuador", "Peru", "Bolivia", "Colombia", "Venezuela"
+  ))
+sa_ecuador <- sa %>%
+  mutate(
+    fill_ecuador = if_else(name_long == "Ecuador", "Ecuador", "Other")
+  )
+esmeraldas_pt <- d_adm1 %>%
+  filter(ADM1_ES == "Esmeraldas") %>%
+  st_point_on_surface()
+
+# add label positions
+label_positions <- tibble::tibble(
+  name = c("Brazil", "Ecuador", "Peru", "Bolivia", "Colombia", "Venezuela"),
+  lon  = c(-65, -78.5, -76, -64, -73, -65),
+  lat  = c(-5, -1.5, -9, -17, 4, 8)
+)
+
+# set map dimensions 
+xlim_reg <- c(-82, -55)
+ylim_reg <- c(-10, 15)
+
+map_overview <- ggplot() +
+  
+  # Countries (Ecuador highlighted)
+  geom_sf(
+    data = sa_ecuador,
+    aes(fill = fill_ecuador),
+    color = "black"
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Ecuador" = "grey",
+      "Other"   = "white"
+    ),
+    guide = "none"
+  ) +
+  
+  # Esmeraldas province
+  geom_sf(
+    data = d_adm1 %>% filter(ADM1_ES == "Esmeraldas"),
+    color = "black",
+    fill = "#E69F00"
+  ) +
+  
+  # Esmeraldas label with leader line
+  ggrepel::geom_label_repel(
+    data = esmeraldas_pt,
+    aes(label = "Esmeraldas", geometry = geometry),
+    stat = "sf_coordinates",
+    color = "white", 
+    nudge_x = -3,
+    nudge_y = 2,
+    size = 3,
+    fill = "#E69F00",
+    segment.color = "black",
+    segment.size = 0.5,
+    min.segment.length = 0
+  ) +
+  
+  # Country labels
+  geom_text(
+    data = label_positions,
+    aes(x = lon, y = lat, label = name),
+    size = 3,
+    fontface = "bold",
+    color = "black"
+  ) +
+  
+  # Coordinate system
+  coord_sf(
+    crs = 4326,
+    xlim = c(-85, -55),
+    ylim = c(-20, 15)
+  ) +
+  
+  labs(x = "Latitude", y = "Longitude", tag="A") +
+  annotation_scale(location = "bl", width_hint = 0.2) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.tag = element_text(face = "bold", size = 16)
+  )
+
+map_overview
+
+```
+
+## 2) Map of population density 
+
+```{r}
+#| label: create map of esmeraldas
+
+#-------------------------------
+# plot esmeraldas
+#-------------------------------
+
+
+# annotation lines
+borbon_lab_line <- data.frame(x1=-78.98970-0.2 ,x2=-78.98970 -0.05,y1=1.0881290+0.06,y2=1.0881290+0.01)
+# tahoua_lab_line <-  data.frame(x1=5.9,x2=5.5,y1=17.9,y2=17.5)
+    
+
+map_pden <- ggplot(data=dpop_plot) +
+  geom_tile(aes(x=x,y=y,fill=pdens), na.rm=TRUE) +
+  geom_sf(data=d_adm1 %>% filter(ADM1_ES == "Esmeraldas"),color="burlywood4", fill=NA) +
+  # add rural communities
+  geom_sf(data=dgps_sf %>% filter(!Name %in% c("Esmeraldas","Borbon")),
+          color="black", 
+          fill = "chartreuse3",
+          shape = 21,        # filled circle
+size = 2.5) +
+  geom_sf(
+  data = dgps_sf %>% filter(Name %in% c("Esmeraldas","Borbon")),
+  shape = 21,        # filled circle
+  size = 2.5,
+  fill = "chartreuse3",
+  color = "black"
+) +
+  # add labels for Esmeraldas and Borbon
+  annotate("text",label="Esmeraldas City", x = dgps$lon[dgps$Name=="Esmeraldas"] - 0.1, 
+           y = dgps$lat[dgps$Name=="Esmeraldas"]+0.07, color = "black") +
+  annotate("text",label="Borbón", x = dgps$lon[dgps$Name=="Borbon"] -0.10, 
+           y = dgps$lat[dgps$Name=="Borbon"] + 0.05, color = "black" ) +
+  annotate("text",label="Rural\nRiver", x = -79.2, y = 0.85, color = "black" ) +
+  annotate("text",label="Rural\nRoad", x = -78.8, y = 1.05, color = "black" ) +
+
+  coord_sf(crs = 4326) +
+  scale_fill_gradientn(
+  colours = c("white", "#F0E442", "#E69F00","#D55E00"),
+  limits = c(0, 200),
+  breaks = seq(0, 200, by = 20),
+  labels = c(seq(0, 180, by = 20), "200+"),
+  na.value = "white",
+  guide=guide_colorbar(title="Population density (persons per sq km)", 
+                                           title.position = "top",
+                                           title.hjust = 0.5,
+                                           direction="horizontal",
+                                           label.position = "bottom",
+                                           label.hjust = 0.5,
+                                           barheight=unit(10,"pt"),
+                                           barwidth=unit(200,"pt"),
+                                           ticks.colour = "white",
+                                           ticks.linewidth = 1,
+                                           frame.colour = "white"
+                        )
+                        ) +
+  geom_sf(data=d_riv2, color =  "#0072B2",lwd=0.1) + 
+  labs(x="Latitude",y="Longitude",tag="B") +
+  annotation_scale(location = "br", width_hint = 0.2) +
+  theme_minimal() +
+  theme(legend.position = c(0.25, 0.95),   # x, y (0–1 scale)
+  legend.justification = c(0.5, 1),
+  legend.direction = "horizontal",
+  legend.background = element_rect(fill = "white", color = NA),
+  plot.tag = element_text(face="bold", size=16)
+  )
+
+map_pden
+
+```
+
+```{r}
+#|label: composite map
+
+comp_map <- map_overview + map_pden + plot_layout(ncol=2,nrow=1)
+comp_map
+
+ggsave(filename = here("figures","ecomid-map-population-density.png"), comp_map, device = "png", width = 360, height = 180, units = "mm")
+```
+
