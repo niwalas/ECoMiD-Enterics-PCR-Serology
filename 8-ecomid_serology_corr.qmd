@@ -1,0 +1,177 @@
+---
+title: "ECoMiD: Serology antigen MFI correlation"
+author: "Nikolina Walas nikolina.walas@ucsf.edu"
+date: "updated: `r Sys.time()`"
+format:
+  html:
+    self-contained: true
+    toc: true
+    embed-resources: true
+    code-fold: true
+    link-external-newwindow: true
+execute: 
+  echo: true
+  warning: false
+  message: false
+---
+
+## File Overview
+
+This script analyzes the correlation between antigens read out from the serology assay at the measurement level (1606).
+
+We report log10MFI correlation in the manuscript
+
+## Set up system
+
+```{r}
+#| label: preamble
+#| message: FALSE
+#| 
+library(here)
+here()
+#----------------------------
+# source the config file
+#----------------------------
+source(here("R","0-config.R"))
+```
+
+## Read in files
+
+```{r}
+sero <- read_csv(here("..","..",
+                      "Data","serology","final","ecomid_serology_datasets",
+                      "ecomid_sero_antigen_seropos_long_2026-05-19.csv")) 
+
+print("Safety check: number of childid with serology results")
+length(unique(sero$childid))
+
+print("number of measurement level samples")
+length(unique(sero$sampleid))
+
+```
+
+## Correlation of MFI values
+
+```{r, width = 20, height = 20}
+df <- sero %>%
+  dplyr::select(sampleid, antigen_lab, mfi)
+
+wide <- pivot_wider(
+  df,
+  names_from = antigen_lab,
+  values_from = mfi
+) %>%
+  dplyr::select(-Control, -`Monitor control`)
+
+# 1. Correlation matrix
+cor_mat <- cor(
+  wide[ , -1],
+  use = "pairwise.complete.obs",
+  method = "pearson"
+)
+
+# 2. Hierarchical clustering on correlations
+hc <- hclust(
+  as.dist(1 - cor_mat),
+  method = "average"
+)
+
+antigen_order <- colnames(cor_mat)[hc$order]
+
+# 3. Reorder correlation matrix
+cor_mat_ord <- cor_mat[antigen_order, antigen_order]
+
+# 4. Sample size per pair (same order automatically)
+present <- !is.na(wide[ , -1])
+n_obs <- t(present) %*% present
+n_obs <- n_obs[antigen_order, antigen_order]
+
+# 5. Plot
+ggcorrplot <- ggcorrplot(cor_mat_ord, type = "lower", hc.order = FALSE,
+   outline.col = "white",
+   ggtheme = ggplot2::theme_gray,
+   colors = c("#6D9EC1", "white", "#E46726"))
+
+ggcorrplot
+
+
+corrplot(cor_mat_ord, method = "color",
+         type = "lower", 
+         hc.order = FALSE,
+         diag = FALSE,
+  tl.col = "black",   # text labels (antigen names)
+  tl.cex = 0.8,       # optional: text size
+  cl.col = "black",    # color legend text
+   outline.col = "white",
+   ggtheme = ggplot2::theme_gray,
+  col = colorRampPalette(c("#6D9EC1", "white", "#E46726"))(200))
+
+
+
+```
+
+## Correlation of log(MFI) values
+
+```{r}
+df2 <- sero %>% filter(group == "Enterics", 
+                       pathogen == "E. histolytica" |
+                         pathogen == "Cryptosporidium" |
+                         pathogen == "Norovirus GII" |
+                         pathogen == "Campylobacter" |
+                         pathogen == "Giardia" |
+                         pathogen == "LT-ETEC" |
+                         pathogen == "Shigella/EIEC" |
+                         pathogen == "Norovirus GI" |
+                         pathogen == "Salmonella" & antigen != "hyle"
+                         ) %>%
+  dplyr::select(sampleid, antigen_lab, log10mfi)
+
+wide <- pivot_wider(
+  df2,
+  names_from = antigen_lab,
+  values_from = log10mfi
+) 
+
+# 1. Correlation matrix
+cor_mat <- cor(
+  wide[ , -1],
+  use = "pairwise.complete.obs",
+  method = "pearson"
+)
+
+# 2. Hierarchical clustering on correlations
+hc <- hclust(
+  as.dist(1 - cor_mat),
+  method = "average"
+)
+
+antigen_order <- colnames(cor_mat)[hc$order]
+
+# 3. Reorder correlation matrix
+cor_mat_ord <- cor_mat[antigen_order, antigen_order]
+
+# 4. Sample size per pair (same order automatically)
+present <- !is.na(wide[ , -1])
+n_obs <- t(present) %*% present
+n_obs <- n_obs[antigen_order, antigen_order]
+
+
+
+# 5. Plot
+ggcorrplot <- ggcorrplot(cor_mat_ord, 
+                         type = "upper", 
+                         hc.order = FALSE,
+                         show.diag = TRUE, 
+                         outline.col = "white",
+                         ggtheme = ggplot2::theme_gray) + 
+  scale_fill_viridis_c(limits = c(0, 1), option = "viridis") +
+  scale_y_discrete(limits = rev, position = "left", expand = c(0,0)) +
+  scale_x_discrete(position = "bottom", expand = c(0,0)) +
+  coord_fixed() +
+  guides(fill = guide_colorbar(title = "Correlation")) + 
+  theme(plot.title = element_text(size = 16))
+
+ggcorrplot
+
+ggsave(here("figures/serology_antigen_corr_plot.tiff"), ggcorrplot, width = 8, height = 8)
+```
