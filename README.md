@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/32488072/README.md)
 ## Study Overview
 
 The ECoMiD (Enteric Cohort Study of Microbiomes and Infectious Diseases) birth 
