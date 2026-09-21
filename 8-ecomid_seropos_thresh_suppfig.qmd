@@ -1,0 +1,107 @@
+---
+title: "ECoMiD Serology, threshold assignment figure"
+date: "updated: `r Sys.time()`"
+author: "Nikolina Walas (nikoewalas@gmail.com"
+format:
+  html:
+    self-contained: true
+    toc: true
+    embed-resources: true
+    code-fold: true
+    link-external-newwindow: true
+execute: 
+  echo: true
+  warning: false
+  message: false
+---
+
+# File description:
+
+The purpose of this file is to generate the supplemental figure of MFI thresholds, as determined for the enteric serology antigen panel.
+
+Thresholds were determined by generating a pre-exposed endemic cohort as outlined in the steps below:
+
+1\) Identify children who had a 100-fold increase in MFI between two timepoints
+
+2\) Take the serology observation at the first timepoint before the 100-fold MFI increase
+
+3\) Take the mean + 3SD of that population
+
+Thresholds for 4 antigen targets were determined by the CDC (Cp17, Cp23, LecA and VSP-5) using ROC curves. We identified the threshold using the pre-exposed endemic cohort, but used the ROC thresholds for final analysis.
+
+Importantly, SalB target did not have enough data to generate a pre-exposed endemic cohort, and therefore the threshold was determined using the mean + 3\*SD of the MFI values on the log10 scale for all samples
+
+## System setup
+
+```{r}
+# Read in files 
+library(here)
+source(here("R", "0-config.R"))
+
+# Read in data
+d1 <- read_rds(here("data/ecomid_sero_antigen_seropos_enteric_cutoffs_plotting_2026-08-26.rds"))
+
+d1 <- d1 %>% mutate()
+#--------------------------
+# custom log labels
+#--------------------------
+log10labs4 <- c( 
+  expression(10^0),
+  expression(10^1),
+  expression(10^2),
+  expression(10^3),
+  expression(10^4)
+)
+```
+
+## Stacked barplot
+
+```{r}
+#--------------------------------#
+# Stacked barplot
+#--------------------------------#
+
+# add in variable for the two age groups
+d1 <- d1 %>%
+  mutate(time_grp = if_else(timepoint <= 9, "6-9 months", "12-24 months"))
+d1$time_grp <- factor(d1$time_grp, levels = c("12-24 months", "6-9 months"))
+
+# plot
+pstack_time <- ggplot(d1, aes(x = log10mfi, fill = time_grp)) +
+  facet_wrap(~antigen_lab, nrow = 3, ncol = 5) +
+  geom_histogram(
+    binwidth = 0.2,
+    position = "stack",
+    color = NA,
+    alpha = 0.8
+  )  +
+  geom_vline(aes(xintercept = log10(mficut), color = "ROC", linetype = "ROC")) +
+  geom_vline(aes(xintercept = log10(pecut), color = "pre-exposed endemic cohort", linetype = "pre-exposed endemic cohort")) +
+  scale_x_continuous(limits = c(0, 4.5), breaks = 0:4, labels = log10labs4) +
+  labs(
+    x = "Luminex IgG (MFI-bg)",
+    y = "Sample count",
+    fill = NULL,
+    color = "",
+    linetype = ""
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom") +
+  scale_fill_manual(values = c(
+    "6-9 months" = "deepskyblue4",
+    "12-24 months" = "lightblue"
+  ),
+  breaks = c("6-9 months", "12-24 months")) +
+  scale_color_manual(values = c(
+    "ROC" = "black",
+    "pre-exposed endemic cohort" = "black"
+  )) +
+  scale_linetype_manual(values = c(
+    "ROC" = "solid",
+    "pre-exposed endemic cohort" = "dashed"
+  )) 
+
+pstack_time
+
+ggsave(filename = here("figures","suppfig10_plot_igg_dists_stackedbar.tiff"), pstack_time, device="tiff",width = 210, height = 150, units = "mm")
+```

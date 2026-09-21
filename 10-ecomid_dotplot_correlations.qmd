@@ -1,0 +1,768 @@
+---
+title: "Serology and PCR: summary-measure dot plots and Spearman correlations"
+subtitle: "Objective 3 of the PCR-vs-serology cleanup"
+author: "Nikolina Walas (nikolina.walas@ucsf.edu)"
+date: "updated: `r Sys.time()`"
+format:
+  html:
+    self-contained: true
+    toc: true
+    embed-resources: true
+    code-fold: true
+    link-external-newwindow: true
+execute:
+  echo: true
+  warning: false
+  message: false
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+## File overview
+
+This file generates the pathogen x community-type dot-plot correlations.
+
+Four comparisons are produced:
+
+-   **(A) SCR vs. PCR prevalence (pooled).** Giardia excluded from the Spearman ρ shown on
+    the plot; Giardia points are still plotted, and the plot is
+    annotated to say so. The Giardia-included ρ is computed and printed
+    separately (not plotted). Used as the first (leftmost) panel of the
+    combined figure below.
+-   **(B) SCR vs. PCR Kaplan-Meier cumulative incidence at 24 months.**
+    Same Giardia handling as (A). Used as the second panel of the
+    combined figure below. Its confidence interval now uses the same
+    matched-sample bootstrap as A, C, and D (see below), rather than
+    the row-level bootstrap `10-ecomid_dotplot_correlations.qmd` uses
+    for this panel.
+-   **(C) SCR vs. seroprevalence (pooled).** Giardia included in ρ.
+    Used as the third (rightmost) panel of the combined figure below.
+-   **(D) SCR vs. seroreversion rate (SRR).** Giardia included in ρ.
+    Standalone only -- not part of the combined figure below -- but
+    additionally exported as a saved ggplot object
+    (`output/dotplot_scr_vs_srr.rds`) so it can be read into a
+    separate R file for a supplemental figure there.
+
+A, B, C, and D use a matched-sample bootstrap (resample 370 children with
+replacement, recompute pathogen-level summaries, take Spearman ρ across
+pathogens) described in CLAUDE.md's Statistical Conventions and
+originally implemented in `9-ecomid_sero_pcr_comp.qmd`. D resamples from
+the union of `sero_conv` and `sero_rev`.
+
+B resamples children and refitting a Kaplan-Meier curve on each replicate. The
+output file used is generated in 
+`7-ecomid_cumulative_incidence_data.qmd` (exported as
+`ecomid_km_intervals_pcr_by_community.rds`) and just resampled by
+`childid` here, the same way A/C/D already resample `sero_conv`/
+`pcr_all`. Only the `survfit()` refit itself runs inside the loop, and
+reading cumulative incidence at 24 months via `summary(fit, times = 24,
+extend = TRUE)` (instead of `broom::tidy()` + the `km_at_rounds()`
+forward-fill grid used elsewhere in this workflow) keeps each
+replicate's per-pathogen extraction lean.
+
+A combined 3-panel figure (single row) is exported. Its three panels
+are document panels A, B, and C, left to right, in that order -- the
+combined figure's panel order matches the document's panel order
+exactly, so no separate composite lettering is needed. D (SCR vs. SRR)
+is not part of the combined figure; it remains standalone, and is
+additionally exported on its own as a saved ggplot object (see its
+bullet above).
+
+
+### Load packages
+
+```{r}
+library(here)
+source(here("R", "0-config.R"))
+library(survival)
+```
+
+### Read in files
+
+```{r}
+# --- Community-level, pre-computed summary tables (population-level; same
+#     source as 9-ecomid_sero_pcr_summary.qmd). "Borbon" is relabeled to the
+#     accented "Borbón" immediately on read-in, to match comm_n_lookup and
+#     the plot legend labels below -- without this, Borbón rows would fail
+#     to match comm_n_lookup and silently drop out of the size legend. ---
+sero_inc_type <- readRDS(here("output/ecomid_pathogen_comm_sero_inc_3_levels.rds")) %>%
+  filter(pathogen != "Strongyloides" & pathogen != "T. solium") %>%
+  mutate(community_type2 = ifelse(community_type2 == "Borbon", "Borbón", community_type2))
+sero_inc_type$community_type2 <- factor(sero_inc_type$community_type2, levels = c("Esmeraldas", "Borbón", "Rural"))
+
+sero_prev_type <- readRDS(here("output/ecomid_sero_prev_rates_3_levels.rds")) %>%
+  mutate(community_type2 = ifelse(community_type2 == "Borbon", "Borbón", community_type2))
+sero_prev_type$community_type2 <- factor(sero_prev_type$community_type2, levels = c("Esmeraldas", "Borbón", "Rural"))
+
+pcr_prev_type <- readRDS(here("output/ecomid_pcr_prev_by_community_3_levels.rds")) %>%
+  mutate(community_type2 = ifelse(community_type2 == "Borbon", "Borbón", community_type2))
+pcr_prev_type$community_type2 <- factor(pcr_prev_type$community_type2, levels = c("Esmeraldas", "Borbón", "Rural"))
+
+sero_rev_type <- readRDS(here("output/ecomid_pathogen_comm_sero_rev_3_levels.rds")) %>%
+  filter(pathogen != "Strongyloides" & pathogen != "T. solium") %>%
+  mutate(community_type2 = ifelse(community_type2 == "Borbon", "Borbón", community_type2))
+sero_rev_type$community_type2 <- factor(sero_rev_type$community_type2, levels = c("Esmeraldas", "Borbón", "Rural"))
+
+# --- Individual-level data, needed for the matched-sample bootstrap (A, C, D) ---
+# "Borbon" relabeled to accented "Borbón" here too, for the same reason as
+# pcr_all/sero_all below -- confirmed against the real data that sero_conv
+# and sero_rev carry the raw unaccented "Borbon". Without this, every join
+# against pcr_all/sero_all by community_type (comparisons A and C) would
+# silently drop all Borbón rows from those bootstraps.
+sero_conv <- readRDS(here("output/ecomid_sero_conv_tbl.rds")) %>%
+  filter(pathogen != "Strongyloides" & pathogen != "T. solium") %>%
+  mutate(community_type = as.character(community_type),
+         community_type = ifelse(community_type == "Borbon", "Borbón", community_type))
+
+sero_rev <- readRDS(here("output/ecomid_sero_rev_tbl.rds")) %>%
+  filter(pathogen != "Strongyloides" & pathogen != "T. solium") %>%
+  mutate(community_type = as.character(community_type),
+         community_type = ifelse(community_type == "Borbon", "Borbón", community_type))
+
+pcr_all <- readRDS(here("data","ecomid_pcr_analysis_data_2026-08-12.rds"))
+pcr_all$community_type <- as.character(pcr_all$community_type)
+pcr_all <- pcr_all %>% mutate(community_type = ifelse(str_detect(community_type, "Rural"), "Rural", community_type))
+pcr_all <- pcr_all %>% mutate(community_type = ifelse(community_type == "Borbon", "Borbón", community_type))
+pcr_all$community_type <- factor(pcr_all$community_type, levels = c("Esmeraldas", "Borbón", "Rural"))
+pcr_all <- pcr_all %>% filter(pathogen %in% sero_conv$pathogen)
+
+sero_all <- read_csv(here("..","..",
+                      "Data","serology","final","ecomid_serology_datasets",
+                      "ecomid_sero_antigen_seropos_long_2026-08-26.csv")) %>%
+  mutate(community_type = ifelse(str_detect(community_type, "Rural"), "Rural", community_type)) %>%
+  mutate(community_type = ifelse(community_type == "Borbon", "Borbón", community_type)) %>%
+  filter(antigen_lab != "S. enterica HlyE") %>%
+  filter(pathogen != "Strongyloides" & pathogen != "T. solium")
+
+# --- PCR KM cumulative incidence by community, every nominal round -- for B ---
+# Exported by 7-ecomid_cumulative_incidence_data.qmd; relabeled to accented
+# "Borbón" here for the same reason as the tables above.
+km_pcr_by_comm_round <- readRDS(here("output/ecomid_km_pcr_by_community_round.rds")) %>%
+  mutate(community_type2 = ifelse(community_type2 == "Borbon", "Borbón", community_type2)) %>% filter(time == 24) %>% filter(pathogen != "S. enterica")
+
+# --- Per-child PCR Kaplan-Meier survival intervals, by community -- for B's
+#     matched-sample bootstrap (section 2 below). Exported by
+#     7-ecomid_cumulative_incidence_data.qmd as km_data_by_comm: one row per
+#     child x pathogen x community_type2, giving that child's own
+#     (tstart, tstop, event) interval. A child's interval doesn't depend on
+#     which other children land in a given bootstrap resample, so it's built
+#     once upstream in file 7 rather than rebuilt inside every one of B's
+#     2000 replicates -- that per-child rebuild is what made an earlier
+#     attempt at this too slow to run in practice. Relabeled to accented
+#     "Borbón" and renamed to plain "community_type" to match sero_conv's
+#     join key (same treatment as pcr_all above); S. enterica dropped here
+#     too, matching km_pcr_by_comm_round's exclusion above, so B's
+#     confidence interval is computed over the same pathogen set as its plot.
+km_data_pcr_by_comm <- readRDS(here("output/ecomid_km_intervals_pcr_by_community.rds")) %>%
+  mutate(community_type = ifelse(community_type2 == "Borbon", "Borbón", community_type2)) %>%
+  filter(pathogen != "S. enterica") %>%
+  select(childid, pathogen, community_type, tstart, tstop, event)
+```
+
+# 1) Build pathogen x community-type comparison data-frames (A, C, D)
+
+```{r}
+d1 <- sero_prev_type %>%
+  select(pathogen, community_type2, sero_prevalence, lower_ci, upper_ci, n_total) %>%
+  filter(pathogen %in% pcr_prev_type$pathogen)
+
+d1b <- sero_inc_type %>%
+  select(pathogen, community_type2, ir_per_100) %>%
+  filter(pathogen %in% pcr_prev_type$pathogen)
+
+d2 <- pcr_prev_type %>%
+  select(pathogen, community_type2, pcr_prevalence, lower_ci, upper_ci, n_total) %>%
+  rename(lower_ci_pcr = lower_ci,
+         upper_ci_pcr = upper_ci,
+         n_total_pcr = n_total) %>%
+  filter(pathogen %in% d1$pathogen)
+
+pathogen_levels <- c("Campylobacter", "Cryptosporidium", "E. histolytica", "Giardia",
+                      "LT-ETEC", "Norovirus GI", "Norovirus GII", "S. enterica", "Shigella/EIEC")
+
+comm_n_lookup <- c(Esmeraldas = 85, "Borbón" = 108, Rural = 177)
+
+# --- A) SCR (pooled) + PCR prevalence (pooled) ---
+d3 <- left_join(d1b, d2, by = c("pathogen", "community_type2")) %>%
+  mutate(n_children = comm_n_lookup[as.character(community_type2)])
+d3$pathogen <- factor(d3$pathogen, levels = pathogen_levels)
+
+# --- C) SCR + seroprevalence ---
+d4 <- left_join(d1, d1b, by = c("pathogen", "community_type2")) %>%
+  mutate(n_children = comm_n_lookup[as.character(community_type2)])
+d4$pathogen <- factor(d4$pathogen, levels = pathogen_levels)
+
+# --- D) SCR + SRR ---
+d5 <- left_join(d1b %>% rename(scr_per_100 = ir_per_100),
+                sero_rev_type %>% select(pathogen, community_type2, ir_per_100) %>%
+                  rename(srr_per_100 = ir_per_100), by = c("pathogen", "community_type2")) %>%
+  mutate(n_children = comm_n_lookup[as.character(community_type2)])
+d5$pathogen <- factor(d5$pathogen, levels = pathogen_levels)
+```
+
+# 1b) PCR Kaplan-Meier cumulative incidence at 24 months (for B's plot points)
+
+Reuses `km_pcr_by_comm_round` (read in above), exported by
+`7-ecomid_cumulative_incidence_data.qmd` -- no need to refit anything
+here. That export already applies the correct "hold the last KM step
+forward onto the nominal round grid" logic (including the EPS-rounding
+fix for baseline-positive event times), which is more careful than
+independently re-deriving a 24-month snapshot in this file would be.
+
+**Data note (resolved):** `sero_conv`/`sero_rev` were confirmed to carry
+the raw unaccented "Borbon" (like every raw-data table in this file
+before relabeling), while `pcr_all`/`sero_all` are relabeled to accented
+"Borbón" on read-in. `sero_conv`/`sero_rev` are now relabeled the same
+way immediately after read-in (see above), so the matched-sample
+bootstraps for A and C correctly include all three community types when
+joining against `pcr_all`/`sero_all` by `community_type` (D's inputs,
+`sero_conv` and `sero_rev`, are relabeled consistently with each other
+regardless).
+
+```{r}
+# --- B) SCR + PCR KM cumulative incidence, 24mo (plot + bootstrap data) ---
+pcr_cuminc24_type <- km_pcr_by_comm_round %>%
+  filter(time == 24) %>%
+  select(pathogen, community_type2, pcr_cum_inc_24 = cum_inc)
+
+d9 <- left_join(d1b, pcr_cuminc24_type, by = c("pathogen", "community_type2")) %>%
+  mutate(n_children = comm_n_lookup[as.character(community_type2)])
+d9$pathogen <- factor(d9$pathogen, levels = pathogen_levels)
+```
+
+# 2) Matched-sample bootstrap Spearman correlations (A, B, C, D)
+
+```{r}
+# Format to exactly 2 significant figures, keeping trailing zeros
+sig2 <- function(x) formatC(x, digits = 2, format = "fg", flag = "#")
+
+# Used by C: individual-level seroprevalence (IgG positivity), from
+# sero_all.
+summarize_serop <- function(df) {
+  df %>%
+    group_by(pathogen, community_type) %>%
+    summarise(
+      n_pos = sum(seropos, na.rm = TRUE),
+      n_total = sum(!is.na(seropos)),
+      prev = n_pos / n_total,
+      .groups = "drop"
+    )
+}
+
+# Used by A, B, C, and D: individual-level seroconversion rate (SCR), from
+# sero_conv. All four of this file's matched-sample-bootstrap panels are
+# anchored on SCR.
+summarize_sero <- function(df) {
+  df %>%
+    group_by(pathogen, community_type) %>%
+    summarise(
+      total_seroconversions = sum(seroconversion, na.rm = TRUE),
+      total_pt_years = sum(person_time_years, na.rm = TRUE),
+      incidence_rate_per_year = total_seroconversions / total_pt_years,
+      .groups = "drop"
+    )
+}
+
+# Used by B: refits a per-pathogen, per-community Kaplan-Meier curve on
+# whichever children a bootstrap replicate resampled (via km_data_pcr_by_comm,
+# read in above), then reads off cumulative incidence at exactly 24 months.
+# summary(..., times = 24, extend = TRUE) is used instead of broom::tidy() +
+# the km_at_rounds() forward-fill grid used elsewhere in this workflow --
+# both read the same fitted step function, but this skips formatting work
+# broom::tidy() does that isn't needed for a single time point per stratum,
+# which matters since this runs on every one of B's 2000 replicates.
+# extend = TRUE reproduces km_at_rounds()'s forward-fill behavior for a
+# pathogen whose last observed round falls before 24 months.
+fit_km_cuminc24 <- function(df) {
+  df %>%
+    group_by(pathogen) %>%
+    group_modify(~ {
+      fit <- survfit(Surv(tstart, tstop, event) ~ community_type, data = .x)
+      s <- summary(fit, times = 24, extend = TRUE)
+      tibble(
+        community_type = sub("^community_type=", "", as.character(s$strata)),
+        cum_inc_24 = 1 - s$surv
+      )
+    }) %>%
+    ungroup()
+}
+```
+
+## A) SCR + PCR prevalence
+
+```{r}
+###############################################################
+##### Matched-sample bootstrap: 370 children resampled with  ##
+##### replacement from the union of the two datasets          #
+###############################################################
+
+## --- Giardia EXCLUDED (this is the version used ON the plot) ---
+sero_conv2 <- sero_conv %>% filter(pathogen != "Giardia")
+pcr2 <- pcr_all %>% filter(pathogen != "Giardia")
+
+summarize_pcr <- function(df) {
+  df %>%
+    group_by(pathogen, community_type) %>%
+    summarise(
+      n_pos = sum(pcrpos, na.rm = TRUE),
+      n_total = sum(!is.na(pcrpos)),
+      pcr_prev = n_pos / n_total,
+      .groups = "drop"
+    )
+}
+
+compute_corr_boot_p1 <- function(sero_df, pcr_df) {
+  all_ids <- union(sero_df$childid, pcr_df$childid)
+  boot_ids <- sample(all_ids, size = 370, replace = TRUE)
+  boot_tbl <- tibble(childid = boot_ids)
+
+  sero_resampled <- boot_tbl %>% left_join(sero_df, by = "childid", relationship = "many-to-many")
+  pcr_resampled  <- boot_tbl %>% left_join(pcr_df,  by = "childid", relationship = "many-to-many")
+
+  sero_sum <- summarize_sero(sero_resampled)
+  pcr_sum  <- summarize_pcr(pcr_resampled)
+
+  merged <- inner_join(sero_sum, pcr_sum, by = c("pathogen", "community_type"))
+  if (nrow(merged) < 3) return(NA_real_)
+  cor(merged$incidence_rate_per_year, merged$pcr_prev, method = "spearman")
+}
+
+run_corr_ci_p1 <- function(sero_df, pcr_df) {
+  set.seed(239)
+  B <- 2000
+  boot_r <- replicate(B, compute_corr_boot_p1(sero_df, pcr_df))
+
+  merged_obs <- inner_join(summarize_sero(sero_df), summarize_pcr(pcr_df),
+                            by = c("pathogen", "community_type"))
+  observed_rho <- cor(merged_obs$incidence_rate_per_year, merged_obs$pcr_prev, method = "spearman")
+
+  tibble(
+    rs    = observed_rho,
+    rs_lo = quantile(boot_r, 0.025, na.rm = TRUE),
+    rs_hi = quantile(boot_r, 0.975, na.rm = TRUE)
+  ) %>%
+    mutate(final_rho = paste0(sig2(rs), " (", sig2(rs_lo), ", ", sig2(rs_hi), ")"))
+}
+
+# Giardia excluded -- used ON plot A
+corr_ci_p1_excl <- run_corr_ci_p1(sero_conv2, pcr2)
+corr_ci_p1_excl
+
+# Giardia included -- reported separately, NOT plotted (supplement)
+corr_ci_p1_incl <- run_corr_ci_p1(sero_conv, pcr_all)
+corr_ci_p1_incl
+```
+
+## B) SCR + PCR KM cumulative incidence, 24 months
+
+Uses the same matched-sample bootstrap as A, C, and D (370 children
+resampled with replacement, pathogen-level summaries recomputed on each
+resample) rather than the row-level bootstrap over the ~27 aggregated
+pathogen x community points that `10-ecomid_dotplot_correlations.qmd`
+uses for this panel. The only structural difference from A/C/D is that
+the PCR side needs an actual model refit -- `fit_km_cuminc24()`, defined
+above -- instead of a simple resampled sum, since cumulative incidence
+at 24 months comes from a Kaplan-Meier curve rather than a raw
+proportion. `km_data_pcr_by_comm` (read in above) is what makes that
+refit affordable inside a 2000-replicate loop: it holds every child's
+own survival interval, precomputed once in
+`7-ecomid_cumulative_incidence_data.qmd`, so each replicate below only
+resamples children and refits `survfit()` -- it never rebuilds
+intervals from raw testing rounds, which is what made an earlier
+attempt at this too slow to run in practice.
+
+Giardia handling matches (A): excluded from the ρ shown on the plot,
+with the all-pathogen ρ computed separately for reference.
+`sero_conv2` (Giardia excluded) is reused from (A)'s section above.
+(Internal variable names below keep their historical `_f` suffix from
+when this was panel F in the seven-panel version of this file.)
+
+```{r}
+km_data_pcr_by_comm2 <- km_data_pcr_by_comm %>% filter(pathogen != "Giardia")
+
+compute_corr_boot_p4 <- function(sero_df, km_df) {
+  all_ids <- union(sero_df$childid, km_df$childid)
+  boot_ids <- sample(all_ids, size = 370, replace = TRUE)
+  boot_tbl <- tibble(childid = boot_ids)
+
+  scr_resampled <- boot_tbl %>% left_join(sero_df, by = "childid", relationship = "many-to-many")
+  km_resampled  <- boot_tbl %>% left_join(km_df,  by = "childid", relationship = "many-to-many")
+
+  scr_sum <- summarize_sero(scr_resampled)
+  km_sum  <- fit_km_cuminc24(km_resampled)
+
+  merged <- inner_join(scr_sum, km_sum, by = c("pathogen", "community_type"))
+  if (nrow(merged) < 3) return(NA_real_)
+  cor(merged$incidence_rate_per_year, merged$cum_inc_24, method = "spearman")
+}
+
+run_corr_ci_p4 <- function(sero_df, km_df) {
+  set.seed(239)
+  B <- 2000
+  boot_r <- replicate(B, compute_corr_boot_p4(sero_df, km_df))
+
+  merged_obs <- inner_join(summarize_sero(sero_df), fit_km_cuminc24(km_df),
+                            by = c("pathogen", "community_type"))
+  observed_rho <- cor(merged_obs$incidence_rate_per_year, merged_obs$cum_inc_24, method = "spearman")
+
+  tibble(
+    rs    = observed_rho,
+    rs_lo = quantile(boot_r, 0.025, na.rm = TRUE),
+    rs_hi = quantile(boot_r, 0.975, na.rm = TRUE)
+  ) %>%
+    mutate(final_rho = paste0(sig2(rs), " (", sig2(rs_lo), ", ", sig2(rs_hi), ")"))
+}
+
+# Giardia excluded -- used ON plot B
+corr_ci_f <- run_corr_ci_p4(sero_conv2, km_data_pcr_by_comm2)
+corr_ci_f
+
+# Giardia included -- reported separately, NOT plotted (supplement)
+corr_ci_f_incl <- run_corr_ci_p4(sero_conv, km_data_pcr_by_comm)
+corr_ci_f_incl
+```
+
+## C) SCR + seroprevalence
+
+```{r}
+sero_prev_indiv <- sero_all
+
+# summarize_serop() and summarize_sero() are both defined above, in
+# section 2's shared preamble.
+
+compute_corr_boot_p2 <- function() {
+  all_ids <- union(sero_conv$childid, sero_prev_indiv$childid)
+  boot_ids <- sample(all_ids, size = 370, replace = TRUE)
+  boot_tbl <- tibble(childid = boot_ids)
+
+  scr_resampled   <- boot_tbl %>% left_join(sero_conv, by = "childid", relationship = "many-to-many")
+  serop_resampled <- boot_tbl %>% left_join(sero_prev_indiv, by = "childid", relationship = "many-to-many")
+
+  scr_sum   <- summarize_sero(scr_resampled)
+  serop_sum <- summarize_serop(serop_resampled)
+
+  merged <- inner_join(serop_sum, scr_sum, by = c("pathogen", "community_type"))
+  if (nrow(merged) < 3) return(NA_real_)
+  cor(merged$incidence_rate_per_year, merged$prev, method = "spearman")
+}
+
+set.seed(239)
+boot_r <- replicate(2000, compute_corr_boot_p2())
+
+merged_obs <- inner_join(summarize_sero(sero_conv), summarize_serop(sero_prev_indiv),
+                          by = c("pathogen", "community_type"))
+observed_rho <- cor(merged_obs$incidence_rate_per_year, merged_obs$prev, method = "spearman")
+
+corr_ci_p2 <- tibble(
+  rs    = observed_rho,
+  rs_lo = quantile(boot_r, 0.025, na.rm = TRUE),
+  rs_hi = quantile(boot_r, 0.975, na.rm = TRUE)
+) %>%
+  mutate(final_rho = paste0(sig2(rs), " (", sig2(rs_lo), ", ", sig2(rs_hi), ")"))
+
+corr_ci_p2
+```
+
+## D) SCR + SRR
+
+```{r}
+summarize_srr <- function(df) {
+  df %>%
+    group_by(pathogen, community_type) %>%
+    summarise(
+      total_seroreversions = sum(seroreversion, na.rm = TRUE),
+      total_pt_years = sum(person_time_years, na.rm = TRUE),
+      sr_rate_per_year = total_seroreversions / total_pt_years,
+      .groups = "drop"
+    )
+}
+
+compute_corr_boot_p3 <- function() {
+  all_ids <- union(sero_conv$childid, sero_rev$childid)
+  boot_ids <- sample(all_ids, size = 370, replace = TRUE)
+  boot_tbl <- tibble(childid = boot_ids)
+
+  scr_resampled <- boot_tbl %>% left_join(sero_conv, by = "childid", relationship = "many-to-many")
+  srr_resampled <- boot_tbl %>% left_join(sero_rev,  by = "childid", relationship = "many-to-many")
+
+  scr_sum <- summarize_sero(scr_resampled)
+  srr_sum <- summarize_srr(srr_resampled)
+
+  merged <- inner_join(srr_sum, scr_sum, by = c("pathogen", "community_type"))
+  if (nrow(merged) < 3) return(NA_real_)
+  cor(merged$incidence_rate_per_year, merged$sr_rate_per_year, method = "spearman")
+}
+
+set.seed(239)
+boot_r <- replicate(2000, compute_corr_boot_p3())
+
+merged_obs <- inner_join(summarize_sero(sero_conv), summarize_srr(sero_rev),
+                          by = c("pathogen", "community_type"))
+observed_rho <- cor(merged_obs$incidence_rate_per_year, merged_obs$sr_rate_per_year, method = "spearman")
+
+corr_ci_p3 <- tibble(
+  rs    = observed_rho,
+  rs_lo = quantile(boot_r, 0.025, na.rm = TRUE),
+  rs_hi = quantile(boot_r, 0.975, na.rm = TRUE)
+) %>%
+  mutate(final_rho = paste0(sig2(rs), " (", sig2(rs_lo), ", ", sig2(rs_hi), ")"))
+
+corr_ci_p3
+```
+
+# 3) Plots
+
+```{r}
+my_colors <- c(
+  "Campylobacter" = "darkgoldenrod1",
+  "Cryptosporidium" = "cornflowerblue",
+  "S. enterica" = "darkseagreen",
+  "Shigella/EIEC" = "darkgreen",
+  "E. histolytica" = "chocolate",
+  "Norovirus GI" = "tan",
+  "Norovirus GII" = "deeppink3",
+  "LT-ETEC" = "blue4",
+  "Giardia" = "grey70"
+)
+
+dotplot_theme <- theme(text = element_text(size = 14),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  axis.line = element_line(color = "black"),
+  axis.ticks = element_line(color = "black"),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  legend.position = "none",
+  panel.background = element_rect(fill = "white"),
+  panel.grid = element_line(color = "grey", linewidth = 0.1))
+```
+
+## A) Seroconversion rate (SCR) vs. PCR prevalence
+
+```{r}
+p1 <- d3 %>% ggplot(aes(x = pcr_prevalence*100,
+                         y = ir_per_100,
+                         color = pathogen)) +
+  geom_point(aes(size = n_children), alpha = 0.7) +
+  scale_size(
+    range = c(3, 10),
+    breaks = c(85, 108, 177),
+    labels = c("Esmeraldas (n=85)", "Borbón (n=108)", "Rural (n=177)"),
+    name = "Community type"
+  ) +
+  labs(x = "PCR prevalence (%)",
+       y = "IgG seroconversion rate (per 100 py)") +
+  scale_color_manual(values = my_colors, name = "") +
+  scale_x_continuous(breaks = seq(0, 30, by = 5), limits = c(0, 30)) +
+  dotplot_theme +
+  coord_cartesian(ylim = c(0, 200)) +
+  geom_text(
+    data = corr_ci_p1_excl,
+    aes(x = -Inf, y = Inf, label = paste0("ρ = ", final_rho)),
+    inherit.aes = FALSE,
+    hjust = -0.1, vjust = 1.5, size = 5, color = "black"
+  ) +  annotate("text", x = 28, y = 10, label = "Giardia excluded from ρ",
+           hjust = 1, vjust = 0, size = 3.5, color = "darkgrey", fontface = "italic")
+
+p1
+```
+
+## C) SCR vs. Seroprevalence
+
+```{r}
+p2 <- d4 %>% ggplot(aes(x = sero_prevalence*100, y = ir_per_100, color = pathogen)) +
+  geom_point(aes(size = n_children), alpha = 0.7) +
+  labs(x = "IgG seroprevalence (%)",
+       y = "IgG seroconversion rate (per 100 py)") +
+  scale_color_manual(values = my_colors, name = "") +
+  scale_size(
+    range = c(3, 10),
+    breaks = c(85, 108, 177),
+    labels = c("Esmeraldas (n=85)", "Borbón (n=108)", "Rural (n=177)"),
+    name = "Community type"
+  ) +
+  theme(text = element_text(size = 14),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  axis.line = element_line(color = "black"),
+  axis.ticks = element_line(color = "black"),
+  axis.text.x = element_text(size = 14),
+  axis.text.y = element_text(size = 14),
+  legend.position = "right",
+  panel.background = element_rect(fill = "white"),
+  panel.grid = element_line(color = "grey", linewidth = 0.1)) +
+  geom_text(
+    data = corr_ci_p2,
+    aes(x = -Inf, y = Inf, label = paste0("ρ = ", final_rho)),
+    inherit.aes = FALSE,
+    hjust = -0.1, vjust = 1.5, size = 5, color = "black"
+  ) +
+  xlim(0, 60) +
+  coord_cartesian(ylim = c(0, 200))
+
+p2
+```
+
+## D) SCR vs. SRR
+
+```{r}
+p3 <- d5 %>% ggplot(aes(x = scr_per_100, y = srr_per_100, color = pathogen)) +
+  geom_point(aes(size = n_children), alpha = 0.7) +
+  labs(x = "Seroconversion rate (per 100 py)",
+       y = "Seroreversion rate (per 100 py)") +
+  scale_color_manual(values = my_colors, name = "") +
+  scale_size(
+    range = c(3, 10),
+    breaks = c(85, 108, 177),
+    labels = c("Esmeraldas (n=85)", "Borbón (n=108)", "Rural (n=177)"),
+    name = "Community type"
+  ) +
+  theme(text = element_text(size = 12),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  axis.line = element_line(color = "black"),
+  axis.ticks = element_line(color = "black"),
+  axis.text.x = element_text(size = 12),
+  axis.text.y = element_text(size = 12),
+  legend.position = "right",
+  panel.background = element_rect(fill = "white"),
+  panel.grid = element_line(color = "grey", linewidth = 0.1)) +
+  geom_text(
+    data = corr_ci_p3,
+    aes(x = -Inf, y = Inf, label = paste0("ρ = ", final_rho)),
+    inherit.aes = FALSE,
+    hjust = -0.1, vjust = 1.5, size = 4, color = "black"
+  ) +
+  xlim(0, 200) +
+  coord_cartesian(ylim = c(0, 300), clip = "off") +
+  scale_y_continuous(limits = c(0, 300), breaks = seq(0, 300, by = 50))
+
+p3
+
+## Saved as its own ggplot object -- not folded into the combined figure
+## below, so it can be read into a separate R file and composed into a
+## supplemental figure there.
+saveRDS(p3, here("output/dotplot_scr_vs_srr.rds"))
+```
+
+## B) SCR vs. PCR KM cumulative incidence, 24 months
+
+```{r}
+p6 <- d9 %>% ggplot(aes(x = pcr_cum_inc_24*100, y = ir_per_100, color = pathogen)) +
+  geom_point(aes(size = n_children), alpha = 0.7) +
+  labs(x = "PCR cumulative incidence at 24m (%)",
+       y = "Seroconversion rate (per 100 py)") +
+  scale_color_manual(values = my_colors, name = "") +
+  scale_size(
+    range = c(3, 10),
+    breaks = c(85, 108, 177),
+    labels = c("Esmeraldas (n=85)", "Borbón (n=108)", "Rural (n=177)"),
+    name = NULL
+  ) +
+  dotplot_theme +
+  coord_cartesian(ylim = c(0, 200)) +
+  geom_text(
+    data = corr_ci_f,
+    aes(x = -Inf, y = Inf, label = paste0("ρ = ", final_rho)),
+    inherit.aes = FALSE,
+    hjust = -0.1, vjust = 1.5, size = 5, color = "black"
+  ) +
+  annotate("text", x = 90, y = 2, label = "Giardia excluded from ρ",
+           hjust = 1, vjust = 0, size = 3.5, color = "darkgrey", fontface = "italic")
+
+p6
+```
+
+# 4) Combined 3-panel figure
+
+Redesigned as a single row of three panels: document panel A (p1, SCR
+vs. PCR prevalence, pooled), document panel B (p6, SCR vs. PCR KM
+cumulative incidence at 24 months), and document panel C (p2, SCR vs.
+seroprevalence, pooled), left to right. Because the combined figure's
+panel order now matches the document's panel order exactly, no separate
+composite lettering is needed -- the A)/B)/C) tags below are the same
+A/B/C as the rest of this document. D (SCR vs. SRR) is not part of this
+combined figure; it remains standalone, and is additionally exported on
+its own as a saved ggplot object just above.
+
+```{r, fig.width = 15, fig.height = 7}
+## plot_layout(guides = "collect") turned out to be unreliable across
+## panels built from different source data frames (each panel's color/size
+## scale has to be byte-for-byte identical -- same factor levels, same
+## order -- for patchwork to recognize them as mergeable; a mismatch
+## anywhere produces exactly the "one legend per row" duplication seen
+## above). Sidestepping that entirely: extract legends directly via
+## cowplot::get_legend() from p1 (A) -- d3's pathogen factor has all 9
+## levels explicitly set and its size scale's breaks/labels are
+## hardcoded, so it's a safe, always-complete source -- suppress the
+## legend completely on all three panels.
+library(cowplot)
+library(gridExtra)
+
+## legend.key.size / legend.text shrink the extracted legend's own native
+## footprint. This matters because draw_plot() (below) does NOT rescale a
+## raw grob to fit the box it's given the way it rescales a ggplot -- the
+## grob just draws at its native size, and the previous attempt's legend
+## was bigger than its box, so its third row got clipped by the page
+## edge. Shrinking it here is what actually fixes that, not the box size.
+color_legend_source <- p1 + theme(legend.position = "right",
+                                   legend.text = element_text(size = 9),
+                                   legend.key.size = unit(0.4, "cm"),
+                                   legend.spacing.y = unit(0.05, "cm"),
+                                   legend.margin = margin(0, 0, 0, 0),
+                                   legend.box.margin = margin(0, 0, 0, 0)) +
+  guides(size = "none", color = guide_legend(nrow = 2, byrow = TRUE))
+color_legend <- cowplot::get_legend(color_legend_source)
+
+size_legend_source <- p1 + theme(legend.position = "right",
+                                  legend.text = element_text(size = 9),
+                                  legend.key.size = unit(0.4, "cm"),
+                                  legend.spacing.y = unit(0.05, "cm"),
+                                  legend.margin = margin(0, 0, 0, 0),
+                                  legend.box.margin = margin(0, 0, 0, 0)) +
+  guides(color = "none", size = guide_legend(nrow = 1, title = NULL))
+size_legend <- cowplot::get_legend(size_legend_source)
+
+## Glue the two legend blocks directly together (no gap between them)
+## into one compact grob -- gtable_cbind() preserves each block's natural
+## width with no padding added in between.
+color_legend <- gtable::gtable_add_cols(color_legend, widths = unit(0.5, "cm"))
+
+combined_legend <- gridExtra::gtable_cbind(color_legend, size_legend)
+## aspect.ratio = 1 forces each panel to draw as a physical square (same
+## on-page length for the x- and y-axis) regardless of how different the
+## underlying data ranges are (e.g. 0-200 for SCR vs. 0-30 for PCR
+## prevalence in panel A). This is a purely visual constraint -- unlike
+## coord_equal(), which scales by data units and would badly distort
+## these panels given how different those ranges are.
+## Only the first (leftmost) panel, A, keeps its y-axis title. A, B, and
+## C all share the same y-axis quantity now (seroconversion rate), so
+## labeling it once on the left avoids repeating the same label three
+## times; each panel's x-axis is a different quantity (PCR prevalence,
+## PCR cumulative incidence, seroprevalence), so all three keep their own
+## x-axis title.
+panel_row <- wrap_plots(
+  p1 + theme(legend.position = "none", aspect.ratio = 1),
+  p6 + theme(legend.position = "none", axis.title.y = element_blank(), aspect.ratio = 1),
+  p2 + theme(legend.position = "none", axis.title.y = element_blank(), aspect.ratio = 1),
+  ncol = 3
+) +
+  plot_annotation(tag_levels = list(c("A)", "B)", "C)"))) &
+  theme(plot.tag = element_text(size = 16, face = "bold"))
+
+## panel_row occupies the top 76% of the canvas; combined_legend sits in
+## the bottom-left, sized to 55% of the width and 28% of the height, with
+## a small y-buffer (0.02 instead of 0) so it isn't drawn flush against
+## the literal bottom edge of the page. These are still the numbers to
+## nudge once you see the real render.
+combined_dotplots <- ggdraw() +
+  draw_plot(panel_row, x = 0, y = 0.24, width = 1, height = 0.76) +
+  draw_plot(combined_legend, x = 0.1, y = 0.06, width = 0.55, height = 0.28)
+
+combined_dotplots
+
+ggsave(here("figures/fig4_dotplot_correlations_combined_3panel.tiff"),
+       combined_dotplots, height = 7, width = 15)
+```
+

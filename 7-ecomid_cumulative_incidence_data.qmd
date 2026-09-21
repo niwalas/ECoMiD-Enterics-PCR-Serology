@@ -1,0 +1,802 @@
+---
+title: "ECoMiD: Cumulative incidence summary datasets (PCR & IgG)"
+subtitle: "Data-generation script -- Objective 1 of the PCR-vs-serology cleanup"
+author: "Nikolina Walas (nikolina.walas@ucsf.edu)"
+date: "updated: `r Sys.time()`"
+format:
+  html:
+    self-contained: true
+    toc: true
+    embed-resources: true
+    code-fold: true
+    link-external-newwindow: true
+execute:
+  echo: true
+  warning: false
+  message: false
+editor:
+  markdown:
+    wrap: 72
+---
+
+## File overview
+
+This is the **data-generation** script in the cleaned PCR-vs-serology
+workflow. It reads the raw PCR and IgG data, builds the pathogen-level
+point prevalence and Kaplan-Meier cumulative incidence datasets used
+throughout the rest of this workflow, and exports them to `output/` so
+that downstream visualization scripts do not need to re-derive them from
+raw data (per the project convention that scripts don't source each
+other directly, but pass data forward via files written to `output/`).
+
+This file was updated on 2026/08/12 to restrict the PCR cohort to the same 370 children 
+in the serology dataset. 
+
+**Run this script first.** Two other cleaned documents in this workflow
+depend on its exports:
+
+-   `12-ecomid_dotplot_correlations.qmd` (Objective 3) uses the
+    community-level, 24-month PCR/IgG export for the seroprevalence-
+    vs-PCR-cumulative-incidence dot plot, and the community-stratified
+    PCR and IgG Kaplan-Meier round-level exports for the PCR-cum.-inc.-
+    vs-IgG-cum.-inc. dot plot (panel G).
+-   `17b-ecomid_age_based_visualization.qmd` (Objective 4) uses the
+    pathogen-level point prevalence and KM exports for the final
+    4-measure summary figure and the KM sensitivity plots.
+
+`9-ecomid_sero_pcr_summary.qmd` (Objective 2) does **not** depend on
+this file -- it reads its own pre-computed population-level RDS files
+(outputs of upstream scripts 2 and 3), independent of the KM work done
+here.
+
+This file generates cumulative incidence datasets at two levels:
+
+1.  **Pathogen x assay** (PCR and IgG), pooled across all community
+    types -- Kaplan-Meier cumulative incidence, with left-truncation/
+    censoring diagnostics, an internal-missing-as-event upper-bound
+    sensitivity analysis, and a Shigella/EIEC 6-month IgG exclusion
+    sensitivity comparison.
+2.  **Pathogen x community_type2** (Esmeraldas, Borbón, Rural) --
+    Kaplan-Meier cumulative incidence for both PCR and IgG, matching
+    the community-stratified build already in use for the correlation
+    dot plots. IgG is also still separately summarized at this level
+    as simple point seroprevalence, kept for panel E's existing
+    seroprevalence-vs-PCR-cumulative-incidence comparison; the new
+    IgG KM build instead feeds panel G's PCR-cumulative-incidence-vs-
+    IgG-cumulative-incidence comparison.
+
+### Specifications
+
+-   The nominal reporting grid is now **assay-specific**
+    (`pcr_rounds` / `igg_rounds`) instead of one shared `km_rounds`
+    vector. The old vector also had an erroneous `21`-month entry
+    that didn't correspond to any real visit round; that's gone. IgG
+    additionally has no 3- or 15-month round, so those are no longer
+    reported for IgG (they were previously just the prior round's
+    estimate held forward, which implied IgG granularity that doesn't
+    exist).
+-   Added `km_rounds_override` + `rounds_for()`: a lookup that returns
+    a pathogen/assay's exact reporting rounds, defaulting to the
+    assay's normal grid unless a pathogen/assay pair has its own
+    entry. Currently it holds one entry: **S. enterica PCR is only
+    reported at 6, 12, and 18 months** (no real PCR testing at 3, 9,
+    15, or 24 months for that pathogen), applied to both the
+    pathogen-level and community-level PCR exports. Add more entries
+    here if other pathogen/assay combinations turn out to have the
+    same kind of gap.
+
+## System setup
+
+```{r}
+library(here)
+source(here("R", "0-config.R"))
+library(survival)
+library(broom)
+```
+
+## Read in raw data & build the pooled long dataset
+
+```{r}
+## ------------------------------------------------------------------------
+## Point & cumulative prevalence, PCR vs serology, at the pathogen level
+## ECoMiD -- restricted to the 9 pathogens assayed by both platforms
+## ------------------------------------------------------------------------
+## Inputs (edit paths as needed):
+##   - PCR:      ecomid_pcr_analysis_data_2026-06-11.rds
+##                 one row per child x visit x pathogen, already pathogen-level
+##                 (pcrpos = 0/1/NA)
+##   - Serology: ecomid_sero_antigen_seropos_long_2026-05-19.rds
+##                 one row per child x timepoint x pathogen x ANTIGEN
+##                 (seropos = 0/1/NA) -- some pathogens have >1 antigen
+##                 (Campylobacter, Cryptosporidium, Norovirus GII, Salmonella)
+## ------------------------------------------------------------------------
+
+pcr_raw  <- readRDS(here("data/ecomid_pcr_analysis_data_2026-08-12.rds"))
+
+sero_raw <- readRDS(here("../../data/serology/final/ecomid_serology_datasets/ecomid_sero_antigen_seropos_long_2026-08-26.rds")) %>%
+  filter(antigen != "hlye")
+
+# check childid alignment
+length(unique(pcr_raw$childid))
+length(unique(sero_raw$childid))
+all(pcr_raw$childid %in% sero_raw$childid)
+
+# The 9 pathogens with both a PCR target and a serology antigen
+overlap_pathogens <- c(
+  "Campylobacter", "Cryptosporidium", "E. histolytica", "Giardia",
+  "LT-ETEC", "Norovirus GI", "Norovirus GII", "S. enterica", "Shigella/EIEC"
+)
+
+## ------------------------------------------------------------------------
+## 1. PCR -- already at the pathogen level (one row per child/visit/pathogen,
+##    regardless of whether tac or gpp was the assay run on that sample)
+## ------------------------------------------------------------------------
+pcr_long <- pcr_raw %>%
+  filter(pathogen %in% overlap_pathogens) %>%
+  transmute(
+    childid,
+    timepoint = as.numeric(visit),
+    pathogen,
+    assay  = "PCR",
+    result = pcrpos
+  )
+
+## ------------------------------------------------------------------------
+## 2. Serology -- collapse antigen -> pathogen: positive if positive to AT
+##    LEAST ONE antigen for that pathogen (hlye excluded for Salmonella);
+##    NA only if every antigen for that pathogen/child/timepoint is missing
+##    (i.e. genuinely untested)
+## ------------------------------------------------------------------------
+any_pos <- function(x) {
+  if (all(is.na(x))) return(NA_real_)
+  as.numeric(any(x == 1, na.rm = TRUE))
+}
+
+sero_long <- sero_raw %>%
+  filter(pathogen %in% overlap_pathogens) %>%
+  group_by(childid, timepoint, pathogen) %>%
+  summarise(result = any_pos(seropos), .groups = "drop") %>%
+  mutate(
+    timepoint = as.numeric(timepoint),
+    assay     = "IgG"
+  ) %>%
+  select(childid, timepoint, pathogen, assay, result)
+
+## ------------------------------------------------------------------------
+## 3. Combine
+## ------------------------------------------------------------------------
+combined <- bind_rows(pcr_long, sero_long) %>%
+  arrange(pathogen, assay, childid, timepoint)
+
+## ------------------------------------------------------------------------
+## Shared constants reused throughout this file
+## ------------------------------------------------------------------------
+## PCR and IgG were not collected on the same visit schedule (IgG has no
+## 3- or 15-month round), so each assay's KM step function is read off
+## only at rounds it actually has -- see km_at_rounds() below.
+pcr_rounds      <- c(3, 6, 9, 12, 15, 18, 24)
+igg_rounds      <- c(6, 9, 12, 18, 24)
+age_axis_breaks <- scale_x_continuous(breaks = c(3, 6, 9, 12, 15, 18, 24))
+
+## Pathogen x assay exceptions to the normal reporting grid above -- some
+## pathogen/assay pairs were only actually tested at a subset of their
+## assay's normal rounds. Currently: S. enterica PCR only has real data at
+## 6, 12, and 18 months (no 3-, 9-, 15-, or 24-month PCR testing for that
+## pathogen), so it gets its own explicit round set rather than pcr_rounds.
+## NOTE: key must match the pathogen label used in overlap_pathogens/the
+## dataframe (currently "S. enterica", not "Salmonella") or the override
+## silently fails to match and this falls back to the full pcr_rounds grid.
+## Add more entries here (keyed "pathogen.assay") if other pairs need it.
+km_rounds_override <- list(
+  "S. enterica.PCR" = c(6, 12, 18)
+)
+
+## Resolves the reporting grid for a given pathogen x assay: the override
+## above if one exists, otherwise the assay's normal grid.
+rounds_for <- function(pathogen, assay) {
+  key <- paste(pathogen, assay, sep = ".")
+  if (!is.null(km_rounds_override[[key]])) return(km_rounds_override[[key]])
+  if (assay == "PCR") pcr_rounds else igg_rounds
+}
+```
+
+## Point prevalence (pathogen x assay x round)
+
+```{r}
+## ------------------------------------------------------------------------
+## Point prevalence: positives / tested, per pathogen x assay x timepoint
+## CI: prop.test() per pathogen x assay x timepoint group -- each child
+## contributes exactly one row to a given timepoint's tally here, so
+## there's no repeated-measures/clustering to adjust for at this stage.
+## ------------------------------------------------------------------------
+point_prevalence <- combined %>%
+  group_by(pathogen, assay, timepoint) %>%
+  summarise(
+    n_tested   = sum(!is.na(result)),
+    n_pos      = sum(result == 1, na.rm = TRUE),
+    point_prev = n_pos / n_tested,
+    .groups = "drop"
+  ) %>%
+  rowwise() %>%
+  mutate(ci_low  = prop.test(n_pos, n_tested)$conf.int[1],
+         ci_high = prop.test(n_pos, n_tested)$conf.int[2]) %>%
+  ungroup()
+
+point_prevalence %>% arrange(pathogen, assay, timepoint) %>% print(n = 30)
+```
+
+## Naive cumulative prevalence (proportion-ever-positive; reference only)
+
+Kept for reference and exported below, but this is **not** the
+"cumulative incidence" measure plotted elsewhere in this workflow -- that
+uses the Kaplan-Meier estimator built in the next section, which
+properly accounts for left-truncated entry and loss to follow-up rather
+than treating every "ever tested" child identically regardless of how
+much of the study they were actually observed for.
+
+```{r}
+## ------------------------------------------------------------------------
+## Assumption: a child's cumulative status carries forward across rounds
+## (a positive at an earlier visit still counts as positive later), and a
+## round with no recorded result for that child/pathogen just doesn't add
+## information -- it neither resets nor advances their status.
+##
+## Exclusion: the 6-month Shigella/EIEC IgG readout is recoded to NA here
+## (this pipeline only) to account for maternal antibody contribution.
+## This has to happen BEFORE cum_pos/cum_tested are computed via cummax(),
+## not as a filter afterward -- cummax() carries a positive forward to
+## every later timepoint for that child, so filtering the 6-month row out
+## only after the fact would hide the point at 6 months without removing
+## its influence on 9-month-plus cumulative estimates.
+## ------------------------------------------------------------------------
+combined_cumulative <- combined %>%
+  mutate(result = if_else(
+    pathogen == "Shigella/EIEC" & assay == "IgG" & timepoint == 6,
+    NA_real_, result
+  ))
+
+cumulative_prevalence <- combined_cumulative %>%
+  arrange(childid, pathogen, assay, timepoint) %>%
+  group_by(childid, pathogen, assay) %>%
+  mutate(
+    cum_pos    = cummax(replace_na(result, 0)),
+    cum_tested = cummax(as.numeric(!is.na(result)))
+  ) %>%
+  ungroup() %>%
+  filter(cum_tested == 1) %>%
+  group_by(pathogen, assay, timepoint) %>%
+  summarise(
+    n_ever_tested = n(),
+    n_ever_pos    = sum(cum_pos),
+    cum_prev      = n_ever_pos / n_ever_tested,
+    .groups = "drop"
+  ) %>%
+  rowwise() %>%
+  mutate(ci_low  = prop.test(n_ever_pos, n_ever_tested)$conf.int[1],
+         ci_high = prop.test(n_ever_pos, n_ever_tested)$conf.int[2]) %>%
+  ungroup()
+
+cumulative_prevalence %>% arrange(pathogen, assay, timepoint) %>% print(n = 30)
+```
+
+## Kaplan-Meier: time to first positive, pathogen x assay level
+
+Point and naive cumulative prevalence, as calculated above, describe
+each round as a cross-section and are sensitive to exactly which
+children were tested that round. Because children enter the cohort at
+different ages, miss individual rounds without dropping out, and in some
+cases are lost to follow-up before the study ends, we instead estimate
+time to first positive (PCR or IgG) using the Kaplan-Meier estimator,
+treating each child's observed testing history as a single
+entry-to-event or entry-to-censoring interval rather than a series of
+independent rounds.
+
+**Missingness handling rules** (per CLAUDE.md conventions):
+
+-   leading NA (before the first observed round) -> left-truncation;
+    entry = first observed round, nothing assumed before it
+-   internal NA (an observed round follows later) -> carried forward /
+    skipped over; never itself fires an event or a censor
+-   trailing NA run (nothing observed after it, and no prior positive)
+    -> right-censored at the FIRST missed round
+-   positive anywhere from entry through the last observed round,
+    including AT entry (baseline positive) -> event at that round
+-   data ends on an observed (negative) round, no trailing NA ->
+    administrative right-censoring at that last observed round
+-   never tested at all (100% NA for that pathogen/assay) -> dropped;
+    no entry time to anchor on
+
+Because carrying an internal missing round forward as negative is
+itself an assumption, we also fit a sensitivity version in which
+internal missing rounds are instead treated as the event itself, giving
+an upper bound on cumulative incidence. Trailing missing rounds are
+still censored in this sensitivity version.
+
+### Build (tstart, tstop, event) intervals
+
+```{r}
+EPS <- 1e-4  # tiny nudge so a same-round entry+event doesn't create a
+             # zero-length (tstart, tstop] interval, which Surv() rejects
+
+code_child_interval <- function(timepoint, result, na_as_event = FALSE) {
+
+  ord       <- order(timepoint)
+  timepoint <- timepoint[ord]
+  result    <- result[ord]
+
+  obs <- which(!is.na(result))
+  if (length(obs) == 0) {
+    return(tibble(tstart = numeric(0), tstop = numeric(0),
+                  event = numeric(0), entry = numeric(0)))
+  }
+
+  first_obs  <- obs[1]
+  last_obs   <- max(obs)
+  entry_time <- timepoint[first_obs]
+
+  window   <- first_obs:last_obs
+
+  is_event <- if (na_as_event) {
+    result[window] == 1 | is.na(result[window])
+  } else {
+    result[window] == 1
+  }
+  fire <- which(is_event)
+
+  if (length(fire) > 0) {
+    tstop <- timepoint[window][fire[1]]
+    event <- 1
+  } else if (last_obs < length(timepoint)) {
+    tstop <- timepoint[last_obs + 1]
+    event <- 0
+  } else {
+    tstop <- timepoint[last_obs]
+    event <- 0
+  }
+
+  tstart <- entry_time
+  if (tstop <= tstart) tstop <- tstart + EPS
+
+  tibble(tstart = tstart, tstop = tstop, event = event, entry = entry_time)
+}
+
+## complete() forces the full child x round grid, per pathogen x assay, so
+## code_child_interval() always sees the true trailing-NA run out to the
+## last round anyone in the cohort was seen for that pathogen/assay.
+combined_complete <- combined_cumulative %>%
+  group_by(pathogen, assay) %>%
+  complete(childid, timepoint) %>%
+  ungroup()
+
+## Sensitivity comparator: identical pipeline, but WITHOUT the Shigella/
+## EIEC 6-month IgG exclusion, so we can see how much that one recoding
+## decision actually moves the curve.
+combined_complete_unexcluded <- combined %>%
+  group_by(pathogen, assay) %>%
+  complete(childid, timepoint) %>%
+  ungroup()
+
+build_km_intervals <- function(data, na_as_event = FALSE) {
+  data %>%
+    arrange(childid, pathogen, assay, timepoint) %>%
+    group_by(childid, pathogen, assay) %>%
+    group_modify(~ code_child_interval(.x$timepoint, .x$result, na_as_event)) %>%
+    ungroup()
+}
+
+km_data_main            <- build_km_intervals(combined_complete,            na_as_event = FALSE)
+km_data_upper           <- build_km_intervals(combined_complete,            na_as_event = TRUE)
+km_data_main_unexcluded <- build_km_intervals(combined_complete_unexcluded, na_as_event = FALSE)
+```
+
+### Diagnostic: entry/event/censor counts per pathogen x assay
+
+```{r}
+km_diagnostic_counts <- km_data_main %>%
+  group_by(pathogen, assay) %>%
+  summarise(
+    n_children  = n(),
+    n_event     = sum(event == 1),
+    n_censored  = sum(event == 0),
+    .groups = "drop"
+  ) %>%
+  arrange(pathogen, assay)
+
+km_diagnostic_counts %>% print(n = 30)
+```
+
+### Fit Kaplan-Meier curves by pathogen x assay
+
+```{r}
+fit_km_by_pathogen <- function(km_data) {
+  km_data %>%
+    group_by(pathogen) %>%
+    group_modify(~ broom::tidy(survfit(
+      Surv(tstart, tstop, event) ~ assay, data = .x,
+      error     = "greenwood",
+      conf.type = "log"
+    ))) %>%
+    ungroup() %>%
+    mutate(assay = sub("^assay=", "", strata))
+}
+
+km_main_tidy <- fit_km_by_pathogen(km_data_main) %>%
+  mutate(
+    cum_inc = 1 - estimate,
+    ci_low  = 1 - conf.high,
+    ci_high = 1 - conf.low,
+    bound   = "Main (internal NA = negative)"
+  )
+
+km_upper_tidy <- fit_km_by_pathogen(km_data_upper) %>%
+  mutate(
+    cum_inc = 1 - estimate,
+    bound   = "Upper bound (internal NA = event)"
+  )
+
+## Sensitivity comparison for the Shigella/EIEC 6-month IgG exclusion --
+## only expected to visibly differ from km_main_tidy for the Shigella/EIEC
+## IgG panel; any divergence elsewhere would flag the exclusion leaking
+## somewhere it shouldn't.
+km_unexcluded_tidy <- fit_km_by_pathogen(km_data_main_unexcluded) %>%
+  mutate(
+    cum_inc = 1 - estimate,
+    bound   = "Sensitivity: Shigella 6-month IgG included"
+  )
+```
+
+### Extract cumulative incidence & n_at_risk at each nominal visit round
+
+`broom::tidy(survfit(...))` only returns a row where an event or a
+censor actually happened. That's fine for the cumulative incidence
+estimate/CI (holding the last known value forward is a correct read of
+the step function), but NOT for `n.risk`, which also only updates at
+event/censor rows. `n_at_risk` is instead computed directly from each
+child's (tstart, tstop] interval.
+
+```{r}
+km_at_rounds <- function(df, rounds) {
+  df <- df %>% mutate(time = round(time, 3)) %>% arrange(time)
+
+  grid <- tibble(time = rounds, cum_inc = NA_real_, ci_low = NA_real_,
+                 ci_high = NA_real_, .is_round = TRUE)
+  actual <- df %>%
+    select(time, cum_inc, ci_low, ci_high) %>%
+    mutate(.is_round = FALSE)
+
+  bind_rows(actual, grid) %>%
+    arrange(time, .is_round) %>%
+    fill(cum_inc, ci_low, ci_high, .direction = "down") %>%
+    filter(.is_round) %>%
+    mutate(
+      cum_inc = replace_na(cum_inc, 0),
+      ci_low  = replace_na(ci_low, 0),
+      ci_high = replace_na(ci_high, 0)
+    ) %>%
+    select(time, cum_inc, ci_low, ci_high)
+}
+
+n_at_risk_by_round <- function(df, rounds) {
+  tibble(
+    time      = rounds,
+    n_at_risk = sapply(rounds, function(r) sum(df$tstart <= r & r <= df$tstop))
+  )
+}
+
+## Each pathogen x assay group is read off its own reporting grid via
+## rounds_for() (assay default, or the pathogen-specific override) rather
+## than one shared set of rounds. group_modify()'s .y carries the grouping
+## key (here: pathogen, assay) for the current group, since .x itself
+## drops the grouping columns.
+km_main_rounds_est <- km_main_tidy %>%
+  group_by(pathogen, assay) %>%
+  group_modify(~ km_at_rounds(.x, rounds = rounds_for(.y$pathogen, .y$assay))) %>%
+  ungroup()
+
+km_main_n_at_risk <- km_data_main %>%
+  group_by(pathogen, assay) %>%
+  group_modify(~ n_at_risk_by_round(.x, rounds = rounds_for(.y$pathogen, .y$assay))) %>%
+  ungroup()
+
+## Trim each pathogen x assay line to start at its own first entry round,
+## rather than plotting/exporting every nominal round from 3 months on.
+km_first_entry <- km_data_main %>%
+  group_by(pathogen, assay) %>%
+  summarise(first_entry = min(tstart), .groups = "drop")
+
+km_main_rounds <- km_main_rounds_est %>%
+  left_join(km_main_n_at_risk, by = c("pathogen", "assay", "time")) %>%
+  left_join(km_first_entry, by = c("pathogen", "assay")) %>%
+  filter(time >= first_entry) %>%
+  select(-first_entry)
+
+km_main_rounds %>% arrange(pathogen, assay, time) %>% print(n = 30)
+```
+
+### Wide export: cumulative incidence by assay, one row per pathogen x round
+
+```{r}
+km_by_assay_wide <- km_main_rounds %>%
+  select(pathogen, assay, time, cum_inc, ci_low, ci_high, n_at_risk) %>%
+  pivot_wider(
+    names_from  = assay,
+    values_from = c(cum_inc, ci_low, ci_high, n_at_risk),
+    names_glue  = "{.value}_{assay}"
+  ) %>%
+  arrange(pathogen, time)
+
+km_by_assay_wide %>% print(n = 30)
+```
+
+## Kaplan-Meier: PCR cumulative incidence by community type (pathogen x community_type2)
+
+PCR, following the community-stratified build already validated for the
+correlation dot plots. A parallel IgG Kaplan-Meier build follows in the
+next section (added to support panel G's PCR-cum.-inc.-vs-IgG-cum.-inc.
+correlation in `12-ecomid_dotplot_correlations.qmd`; previously deferred
+as a larger piece of new analysis). IgG is additionally still summarized
+at the community level as simple point seroprevalence further below,
+which panel E continues to use.
+
+```{r}
+## community_type lives in sero_raw, at the child level -- pulled in here
+## just for this section. community_type2 collapses "Rural Road"/"Rural
+## River" into "Rural"; everything else (including "Borbon") passes
+## through unchanged.
+child_community <- sero_raw %>%
+  distinct(childid, community_type) %>%
+  mutate(community_type2 = case_when(
+    community_type == "Rural Road"  ~ "Rural",
+    community_type == "Rural River" ~ "Rural",
+    TRUE ~ community_type
+  )) %>%
+  select(childid, community_type2)
+
+community_n <- child_community %>%
+  count(community_type2, name = "n_children")
+
+pcr_by_comm <- pcr_long %>%
+  inner_join(child_community, by = "childid") %>%
+  group_by(pathogen, community_type2) %>%
+  complete(childid, timepoint) %>%
+  ungroup()
+
+km_data_by_comm <- pcr_by_comm %>%
+  arrange(childid, pathogen, community_type2, timepoint) %>%
+  group_by(childid, pathogen, community_type2) %>%
+  group_modify(~ code_child_interval(.x$timepoint, .x$result, na_as_event = FALSE)) %>%
+  ungroup()
+```
+
+### Diagnostic: does every pathogen have all 3 community types?
+
+```{r}
+## If this shows only 1-2 rows for any pathogen instead of 3, that
+## pathogen's PCR data doesn't actually span all community types, which is
+## a real data question, not something to paper over.
+km_data_by_comm %>% distinct(pathogen, community_type2) %>% count(pathogen) %>% print(n = 30)
+```
+
+### Fit & extract PCR community-level KM at each nominal round
+
+```{r}
+## broom::tidy(survfit(...)) only includes a `strata` column when more than
+## one community_type2 level is actually present in the data being fit --
+## reconstruct it from the single level present if needed.
+km_tidy_by_comm <- km_data_by_comm %>%
+  group_by(pathogen) %>%
+  group_modify(~ {
+    tidied <- broom::tidy(survfit(
+      Surv(tstart, tstop, event) ~ community_type2, data = .x,
+      error = "greenwood", conf.type = "log"
+    ))
+    if (!"strata" %in% names(tidied)) {
+      tidied$strata <- paste0("community_type2=", unique(.x$community_type2))
+    }
+    tidied
+  }) %>%
+  ungroup() %>%
+  mutate(
+    community_type2 = sub("^community_type2=", "", strata),
+    cum_inc         = 1 - estimate,
+    ci_low          = 1 - conf.high,
+    ci_high         = 1 - conf.low
+  )
+
+## Reuse the same km_at_rounds()/n_at_risk_by_round() helpers defined above,
+## just grouped by community_type2 instead of assay -- this is what makes
+## the community-level export "time based" (every nominal round) rather
+## than a single 24-month snapshot. This section is PCR only, so rounds_for()
+## is always called with assay = "PCR" -- it still applies the S. enterica
+## override (6/12/18 only), same as the pooled export above.
+km_pcr_by_comm_rounds_est <- km_tidy_by_comm %>%
+  group_by(pathogen, community_type2) %>%
+  group_modify(~ km_at_rounds(.x, rounds = rounds_for(.y$pathogen, "PCR"))) %>%
+  ungroup()
+
+km_pcr_by_comm_n_at_risk <- km_data_by_comm %>%
+  group_by(pathogen, community_type2) %>%
+  group_modify(~ n_at_risk_by_round(.x, rounds = rounds_for(.y$pathogen, "PCR"))) %>%
+  ungroup()
+
+km_pcr_by_comm_first_entry <- km_data_by_comm %>%
+  group_by(pathogen, community_type2) %>%
+  summarise(first_entry = min(tstart), .groups = "drop")
+
+km_pcr_by_comm_rounds <- km_pcr_by_comm_rounds_est %>%
+  left_join(km_pcr_by_comm_n_at_risk, by = c("pathogen", "community_type2", "time")) %>%
+  left_join(km_pcr_by_comm_first_entry, by = c("pathogen", "community_type2")) %>%
+  filter(time >= first_entry) %>%
+  select(-first_entry)
+
+km_pcr_by_comm_rounds %>% arrange(pathogen, community_type2, time) %>% print(n = 30)
+```
+
+## Kaplan-Meier: IgG cumulative incidence by community type (pathogen x community_type2)
+
+Mirrors the PCR community-stratified build directly above -- same
+`code_child_interval()` / `survfit(Surv(tstart, tstop, event) ~
+community_type2)` machinery, just sourced from IgG instead of PCR.
+Sourced from `combined_cumulative` (not the raw `sero_long`/`combined`)
+filtered to `assay == "IgG"`, so the Shigella/EIEC 6-month IgG exclusion
+carries through here exactly as it does for the pathogen-level IgG KM
+above -- using `combined`/`sero_long` directly would silently reintroduce
+that excluded timepoint into this community-level build.
+
+```{r}
+igg_by_comm <- combined_cumulative %>%
+  filter(assay == "IgG") %>%
+  inner_join(child_community, by = "childid") %>%
+  group_by(pathogen, community_type2) %>%
+  complete(childid, timepoint) %>%
+  ungroup()
+
+km_data_igg_by_comm <- igg_by_comm %>%
+  arrange(childid, pathogen, community_type2, timepoint) %>%
+  group_by(childid, pathogen, community_type2) %>%
+  group_modify(~ code_child_interval(.x$timepoint, .x$result, na_as_event = FALSE)) %>%
+  ungroup()
+```
+
+### Diagnostic: does every pathogen have all 3 community types (IgG)?
+
+```{r}
+km_data_igg_by_comm %>% distinct(pathogen, community_type2) %>% count(pathogen) %>% print(n = 30)
+```
+
+### Fit & extract IgG community-level KM at each nominal round
+
+```{r}
+## Same strata-reconstruction fallback as the PCR fit above.
+km_tidy_igg_by_comm <- km_data_igg_by_comm %>%
+  group_by(pathogen) %>%
+  group_modify(~ {
+    tidied <- broom::tidy(survfit(
+      Surv(tstart, tstop, event) ~ community_type2, data = .x,
+      error = "greenwood", conf.type = "log"
+    ))
+    if (!"strata" %in% names(tidied)) {
+      tidied$strata <- paste0("community_type2=", unique(.x$community_type2))
+    }
+    tidied
+  }) %>%
+  ungroup() %>%
+  mutate(
+    community_type2 = sub("^community_type2=", "", strata),
+    cum_inc         = 1 - estimate,
+    ci_low          = 1 - conf.high,
+    ci_high         = 1 - conf.low
+  )
+
+## rounds_for() is called with assay = "IgG" here, so this reads off the
+## igg_rounds grid (no 3- or 15-month round) rather than pcr_rounds.
+km_igg_by_comm_rounds_est <- km_tidy_igg_by_comm %>%
+  group_by(pathogen, community_type2) %>%
+  group_modify(~ km_at_rounds(.x, rounds = rounds_for(.y$pathogen, "IgG"))) %>%
+  ungroup()
+
+km_igg_by_comm_n_at_risk <- km_data_igg_by_comm %>%
+  group_by(pathogen, community_type2) %>%
+  group_modify(~ n_at_risk_by_round(.x, rounds = rounds_for(.y$pathogen, "IgG"))) %>%
+  ungroup()
+
+km_igg_by_comm_first_entry <- km_data_igg_by_comm %>%
+  group_by(pathogen, community_type2) %>%
+  summarise(first_entry = min(tstart), .groups = "drop")
+
+km_igg_by_comm_rounds <- km_igg_by_comm_rounds_est %>%
+  left_join(km_igg_by_comm_n_at_risk, by = c("pathogen", "community_type2", "time")) %>%
+  left_join(km_igg_by_comm_first_entry, by = c("pathogen", "community_type2")) %>%
+  filter(time >= first_entry) %>%
+  select(-first_entry)
+
+km_igg_by_comm_rounds %>% arrange(pathogen, community_type2, time) %>% print(n = 30)
+```
+
+## IgG point seroprevalence by community type (pathogen x community_type2 x round)
+
+Not Kaplan-Meier -- simple point prevalence (positives / tested) at each
+round, per pathogen x community type. Paired with the PCR KM export above
+for panel E's community-level correlation work in
+`12-ecomid_dotplot_correlations.qmd`. (Panel G instead uses the IgG KM
+build in the section above.)
+
+```{r}
+igg_seroprev_by_comm_rounds <- combined %>%
+  filter(assay == "IgG") %>%
+  inner_join(child_community, by = "childid") %>%
+  group_by(pathogen, community_type2, timepoint) %>%
+  summarise(
+    n_pos          = sum(result == 1, na.rm = TRUE),
+    n_tested       = sum(!is.na(result)),
+    seroprevalence = n_pos / n_tested,
+    .groups = "drop"
+  ) %>%
+  rename(time = timepoint)
+
+igg_seroprev_by_comm_rounds %>% arrange(pathogen, community_type2, time) %>% print(n = 30)
+```
+
+## 24-month snapshot: PCR cumulative incidence vs. IgG seroprevalence, by community
+
+Convenience export for the correlation dot plot in
+`12-ecomid_dotplot_correlations.qmd` (Objective 3, plot E) -- reads the
+fitted step function's value at (or just before) 24 months for PCR, and
+IgG point seroprevalence at exactly 24 months, both by pathogen x
+community type. (Plot G's PCR-cum.-inc.-vs-IgG-cum.-inc. snapshot is
+built directly in that file from the two round-level KM exports below,
+the same way plot F already reads the PCR one -- no separate snapshot
+export is needed here for G.)
+
+```{r}
+pcr_cuminc_24_by_comm <- km_tidy_by_comm %>%
+  filter(time <= 24) %>%
+  group_by(pathogen, community_type2) %>%
+  slice_max(time, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(pathogen, community_type2, pcr_cum_inc = cum_inc)
+
+igg_seroprev_24_by_comm <- igg_seroprev_by_comm_rounds %>%
+  filter(time == 24) %>%
+  transmute(pathogen, community_type2, seroprevalence)
+
+pcr_igg_24mo_by_community <- inner_join(
+  igg_seroprev_24_by_comm, pcr_cuminc_24_by_comm,
+  by = c("pathogen", "community_type2")
+) %>%
+  left_join(community_n, by = "community_type2")
+
+pcr_igg_24mo_by_community %>% print(n = 30)
+```
+
+## Export datasets
+
+```{r}
+## Pathogen-level (both assays)
+write_csv(point_prevalence,      here("output/ecomid_point_prevalence_pcr_vs_serology.csv"))
+write_csv(cumulative_prevalence, here("output/ecomid_cumulative_prevalence_pcr_vs_serology.csv"))
+write_csv(km_by_assay_wide,      here("output/ecomid_km_cumulative_incidence_pcr_vs_igg_by_round.csv"))
+
+saveRDS(km_main_tidy,       here("output/ecomid_km_main_tidy.rds"))
+saveRDS(km_upper_tidy,      here("output/ecomid_km_upper_tidy.rds"))
+saveRDS(km_unexcluded_tidy, here("output/ecomid_km_unexcluded_tidy.rds"))
+saveRDS(km_main_rounds,     here("output/ecomid_km_main_rounds.rds"))
+
+## Community-level (PCR KM + IgG KM + IgG point prevalence)
+saveRDS(km_pcr_by_comm_rounds,        here("output/ecomid_km_pcr_by_community_round.rds"))
+## Per-child PCR survival intervals (tstart, tstop, event), by community --
+## exported so 10b-ecomid_dotplot_correlations.qmd's panel B can bootstrap
+## by resampling children and refitting Kaplan-Meier per replicate, without
+## rebuilding intervals from raw testing rounds on every one of 2000
+## replicates (the slow, non-vectorized group_modify() step above). A
+## child's own interval doesn't depend on which other children land in a
+## given bootstrap resample, so it's exported once here rather than
+## recomputed downstream.
+saveRDS(km_data_by_comm,              here("output/ecomid_km_intervals_pcr_by_community.rds"))
+saveRDS(km_igg_by_comm_rounds,        here("output/ecomid_km_igg_by_community_round.rds"))
+saveRDS(igg_seroprev_by_comm_rounds,  here("output/ecomid_igg_seroprevalence_by_community_round.rds"))
+saveRDS(pcr_igg_24mo_by_community,    here("output/ecomid_pcr_igg_24mo_by_community.rds"))
+
+## Diagnostics (kept for review, not consumed downstream)
+write_csv(km_diagnostic_counts, here("output/ecomid_km_diagnostic_counts_pathogen_assay.csv"))
+```
