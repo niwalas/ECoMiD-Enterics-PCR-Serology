@@ -1,0 +1,379 @@
+---
+title: "Serology and PCR overview: supplemental tables and rate figures"
+subtitle: "Population-level summary tables and SCR/SRR figures -- Objective 2 of the PCR-vs-serology cleanup"
+author: "Nikolina Walas (nikolina.walas@ucsf.edu)"
+date: "updated: `r Sys.time()`"
+format:
+  html:
+    self-contained: true
+    toc: true
+    embed-resources: true
+    code-fold: true
+    link-external-newwindow: true
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+## File Overview
+
+This file generates the sampling/prevalence
+supplemental tables and the seroconversion/seroreversion rate figures for the manuscript.
+
+Output from this document:
+
+1.  Supplemental tables for the ecomid pcr-serology manuscript: sampling
+    counts by round/assay, and pathogen-level prevalence by IgG and PCR
+2.  Supplemental figures comparing seroconversion and seroreversion
+    rates at the community-type level and in binned age groups (\<12
+    months and \>= 12 months)
+
+There are **370** unique children included in the serology analysis (the
+Table 1 / final enrolled sample set), contributing **1601** individual
+samples. There are **370** unique children included in the PCR analysis,
+contributing **2231** individual samples. All 370 serology children have
+a PCR result at some timepoint.
+
+| Months | PCR assay (n = 370 children) (N = 2231 samples) | Serology Assay (n = 370 children) (N = 1601 samples) |
+|----|----|----|
+| 3 | X |  |
+| 6 | X | X |
+| 9 | X | X |
+| 12 | X | X |
+| 15 | X |  |
+| 18 | X | X |
+| 24 | X | X |
+
+### Load packages
+
+```{r}
+library(here)
+source(here("R", "0-config.R"))
+```
+
+### Read in files
+
+```{r}
+# seroconversion by community type + pathogen
+sero_inc_type <- readRDS(here("output/ecomid_pathogen_comm_sero_inc_3_levels.rds"))  %>%
+  filter(pathogen != "Strongyloides" & pathogen != "T. solium") %>%
+  mutate(community_type2 = ifelse(community_type2 == "Borbon", "Borbón", community_type2))
+sero_inc_type$community_type2 <- factor(sero_inc_type$community_type2, levels = c("Esmeraldas", "Borbón", "Rural"))
+
+# seroconversion by age group
+sero_inc_type2 <- readRDS(here("output/ecomid_pathogen_agegroup_sero_inc.rds")) %>%
+  filter(pathogen != "Strongyloides" & pathogen != "T. solium")
+
+# seroprevalence by community type + pathogen
+sero_prev_type <- readRDS(here("output/ecomid_sero_prev_rates_3_levels.rds")) %>%
+  mutate(community_type2 = ifelse(community_type2 == "Borbon", "Borbón", community_type2))
+sero_prev_type$community_type2 <- factor(sero_prev_type$community_type2, levels = c("Esmeraldas", "Borbón", "Rural"))
+
+# pcr prevalence by community type + pathogen
+pcr_prev_type <- readRDS(here("output/ecomid_pcr_prev_by_community_3_levels.rds")) %>%
+  mutate(community_type2 = ifelse(community_type2 == "Borbon", "Borbón", community_type2))
+pcr_prev_type$community_type2 <- factor(pcr_prev_type$community_type2, levels = c("Esmeraldas", "Borbón", "Rural"))
+
+# seroreversion rate by community type + pathogen
+sero_rev_type <- readRDS(here("output/ecomid_pathogen_comm_sero_rev_3_levels.rds")) %>%
+  filter(pathogen != "Strongyloides" & pathogen != "T. solium") %>%
+  mutate(community_type2 = ifelse(community_type2 == "Borbon", "Borbón", community_type2))
+sero_rev_type$community_type2 <- factor(sero_rev_type$community_type2, levels = c("Esmeraldas", "Borbón", "Rural"))
+
+# seroreversion by age group
+sero_rev_type2 <- readRDS(here("output/ecomid_pathogen_agegroup_sero_rev.rds")) %>%
+  filter(pathogen != "Strongyloides" & pathogen != "T. solium")
+
+# overall measures (by pathogen)
+sero_prev_path <- readRDS(here("output/ecomid_sero_prev_rates.rds")) %>%
+  filter(community_name == "All communities")
+
+pcr_prev_path <- readRDS(here("output/ecomid_pcr_prev_by_pathogen.rds"))
+
+# raw measures (by timepoint) -- needed only for the sampling-count table below
+pcr_all <- readRDS(here("data","ecomid_pcr_analysis_data_2026-08-12.rds"))
+sero_all <- read_csv(here("..","..",
+                      "Data","serology","final","ecomid_serology_datasets",
+                      "ecomid_sero_antigen_seropos_long_2026-08-26.csv")) %>%
+  mutate(community_type = ifelse(str_detect(community_type, "Rural"), "Rural", community_type)) %>%
+  mutate(community_type = ifelse(community_type == "Borbon", "Borbón", community_type)) %>%
+  filter(antigen_lab != "S. enterica HlyE")
+```
+
+# 1) Overall prevalence (supplemental table 1+3)
+
+```{r}
+#----------#
+# Count of samples at each timepoint
+#----------#
+
+# pcr
+length(unique(pcr_all$childid))
+pcr_sum <- pcr_all %>% group_by(visit, pathogen) %>%
+  summarise(n = n()) %>%
+  arrange(pathogen) %>%
+  ungroup() %>%
+  group_by(visit) %>%
+  summarise(max_n_pcr = max(n)) %>% mutate(timepoint = paste0("month_", visit)) %>% select(-visit) %>%
+  pivot_wider(names_from = timepoint, values_from = max_n_pcr) %>% mutate(collection = "stool") %>%
+  select(8, 1:7)
+
+pcr_sum
+
+# serology
+igg_sum <- sero_all %>% group_by(timepoint, antigen_lab) %>%
+  summarise(n = n()) %>%
+  arrange(antigen_lab) %>%
+  ungroup() %>%
+  group_by(timepoint) %>%
+  summarise(max_n_igg = max(n)) %>%
+  mutate(timepoint = paste0("month_", timepoint)) %>%
+  pivot_wider(names_from = timepoint, values_from = max_n_igg) %>% mutate(collection = "blood") %>%
+  select(6, 1:5) %>%
+  mutate(month_3 = NA,
+         month_15 = NA)
+igg_sum
+
+sup_tab_1 <- rbind(pcr_sum, igg_sum) %>% mutate(total_samples = rowSums(across(2:8), na.rm = TRUE))
+writexl::write_xlsx(sup_tab_1, here("output/supp_table_1_sampling.xlsx"))
+
+# IQR for manuscript
+# pcr
+bychild <- pcr_all %>% select(childid, visit) %>% unique() %>% group_by(childid) %>% summarise(n_samples = n())
+bychild %>% summarise(median = median(n_samples),
+                      mean = mean(n_samples),
+                      IQR = IQR(n_samples))
+quantile(bychild$n_samples, probs = c(0.25, 0.5, 0.75))
+
+# igg
+bychild <- sero_all %>% select(childid, timepoint) %>% unique() %>% group_by(childid) %>% summarise(n_samples = n())
+bychild %>% summarise(median = median(n_samples),
+                      mean = mean(n_samples),
+                      IQR = IQR(n_samples))
+quantile(bychild$n_samples, probs = c(0.25, 0.5, 0.75))
+
+#----------#
+# pathogen prevalence over all timepoints
+#----------#
+
+igg_path <- sero_prev_path %>% mutate(prev = paste0(round(sero_prevalence*100, 1),
+                                                    " (",
+                                           round(lower_ci*100, 1), ", ",
+                                           round(upper_ci*100, 1), ")")) %>%
+  select(-sero_prevalence, -lower_ci, -upper_ci, -community_name, -community_type) %>%
+  mutate(assay = "igg_prevalence") %>%
+  filter(pathogen != "Strongyloides" & pathogen != "T. solium")
+
+pcr_path <- pcr_prev_path %>% mutate(prev = paste0(round(prevalence*100, 1), " (",
+                                           round(lower_ci*100, 1), ", ", round(upper_ci*100, 1), ")")) %>%
+  select(-prevalence, -lower_ci, -upper_ci, -community_name) %>%
+  mutate(assay = "pcr_prevalence") %>%
+  filter(pathogen %in% igg_path$pathogen)
+
+s_tab2 <- rbind(igg_path, pcr_path) %>% group_by(pathogen) %>%
+  select(pathogen, assay, n_pos, n_total, prev) %>%
+  arrange(pathogen, desc(assay))
+
+s_tab2
+
+writexl::write_xlsx(s_tab2, here("output/supp_table_3_prev_pathogen.xlsx"))
+```
+
+# 2) Population measures by community
+
+### Seroconversion rate per pathogen
+
+```{r}
+#| fig-width: 8
+#| fig-height: 8
+
+sero_inc_type %>%
+  arrange(community_type2) %>%
+  ggplot(aes(x = community_type2, y = ir_per_100, color = community_type2)) +
+  geom_point() +
+  labs(y = "Seroconversion Rate per 100 Person-Years",
+       x = "Community Type",
+       title = "Seroconversion Rate Across Community type") +
+  scale_color_manual(values = nytpal) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 10),
+    legend.position = "right",
+    panel.background = element_rect(fill = "white"),
+    panel.grid = element_line(color = "grey", linewidth = 0.1)) +
+  geom_errorbar(aes(ymin = ir_lo_per_100, ymax = ir_hi_per_100), width = 0.1, linewidth = 0.5) +
+  facet_wrap( ~ pathogen, ncol= 4, scales = "free_y")
+```
+
+### Seroreversion rate per pathogen
+
+```{r}
+#| fig-width: 8
+#| fig-height: 8
+
+sero_rev_type$community_type2 <- factor(sero_rev_type$community_type2, levels = c("Esmeraldas", "Borbón", "Rural"))
+
+sero_rev_type %>%
+  arrange(community_type2) %>%
+  ggplot(aes(x = community_type2, y = ir_per_100, color = community_type2)) +
+  geom_point() +
+  labs(y = "Seroreversion Rate per 100 Person-Years",
+       x = "Community Type",
+       title = "Seroconversion Rate Across Community type") +
+  scale_color_manual(values = nytpal) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 10),
+    legend.position = "right",
+    panel.background = element_rect(fill = "white"),
+    panel.grid = element_line(color = "grey", linewidth = 0.1)) +
+  geom_errorbar(aes(ymin = ir_lo_per_100, ymax = ir_hi_per_100), width = 0.1, linewidth = 0.5) +
+  facet_wrap( ~ pathogen, ncol= 4, scales = "free_y")
+```
+
+### SUPP FIG: SCR and SRR composite figures
+
+```{r}
+##--------------------------##
+##------ BY COMMUNITY ------##
+##--------------------------##
+
+combo_df <- sero_rev_type %>% mutate(metric = "Seroreversion")  %>%
+  rbind(sero_inc_type %>% mutate(metric = "Seroconversion (force of infection)"))
+
+combo_df$community_type2 <- as.character(combo_df$community_type2)
+
+combo_df$community_type2 <- factor(
+  combo_df$community_type2,
+  levels = c("Esmeraldas", "Rural", "Borbón")
+)
+
+combo_df$pathogen <- factor(
+  combo_df$pathogen,
+  levels = c("Campylobacter", "LT-ETEC", "Norovirus GII", "Cryptosporidium",
+             "Shigella/EIEC", "Norovirus GI", "S. enterica", "Giardia", "E. histolytica")
+)
+
+p_combo <- ggplot(
+  combo_df,
+  aes(
+    x = ir*100,
+    y = pathogen,
+    color = community_type2,
+    group = community_type2
+  )
+) +
+  scale_y_discrete(limits = rev(levels(combo_df$pathogen))) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbarh(
+    aes(xmin = ir_lo*100, xmax = ir_hi*100),
+    position = position_dodge(width = 0.5),
+    height = 0.2,
+    linewidth = 0.5
+  ) +
+  scale_color_manual(
+    values = nytpal,
+    breaks = c("Esmeraldas", "Borbón", "Rural")
+  ) +
+  facet_wrap(~ metric, scales = "free_x") +
+  theme_minimal() +
+  labs(y = "", x = "rate per 100 child-years at risk") +
+  theme(text = element_text(size = 12),
+    legend.position = c(0.9, 0.8),
+    legend.title = element_blank(),
+    legend.background = element_rect(fill = "white", color = "white"),
+    panel.border = element_blank()
+  )
+
+p_combo <- p_combo +
+  ggh4x::facetted_pos_scales(
+    x = list(
+      metric == "Seroconversion" ~ scale_x_continuous(limits = c(0, 200)),
+      metric == "Seroreversion" ~ scale_x_continuous(limits = c(0, 500))
+    )
+  )
+
+p_combo
+
+ggsave(here("figures/suppfig7_scr_srr_communitytype.tiff"), p_combo, width = 210, height = 120, units = "mm")
+
+##--------------------------##
+##-------- BY AGE ----------##
+##--------------------------##
+
+combo_df2 <- sero_rev_type2 %>% mutate(metric = "Seroreversion")  %>%
+  rbind(sero_inc_type2 %>% mutate(metric = "Seroconversion (force of infection)"))
+
+combo_df2$age_group <- factor(combo_df2$age_group,
+                              levels = c("12-24 months", "6-9 months"))
+
+combo_df2$pathogen <- factor(combo_df2$pathogen,
+                            levels = c("Campylobacter", "LT-ETEC",
+                                       "Norovirus GII", "Cryptosporidium",
+                                       "Shigella/EIEC",
+                                       "Norovirus GI", "S. enterica",
+                                       "Giardia",  "E. histolytica"))
+
+p_combo2 <- ggplot(combo_df2, aes(x = ir*100,
+                     y = pathogen,
+                     color=age_group,
+                     group = age_group )) +
+  scale_y_discrete(limits = rev(levels(combo_df2$pathogen))) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbarh(aes(xmin = ir_lo*100,
+                     xmax = ir_hi*100),
+                 position = position_dodge(width = 0.5),
+                 height = 0.2,
+                 linewidth = 0.5) + scale_color_manual(
+  values = nytpal,
+  breaks = rev(levels(combo_df2$age_group))
+) +
+  facet_wrap(~ metric, scales = "free_x") +
+  theme_minimal() +
+  labs(y = "",
+       x = "rate per 100 child-years at risk") +
+  theme(
+      legend.position = c(0.9, 0.8),
+      legend.title = element_blank(),
+      legend.background = element_rect(fill = "white", color = "white"),
+      panel.border = element_blank())
+
+p_combo2
+
+#ggsave(here("figures/suppfig5_seroconversion_seroreversion_agegroup.tiff"), p_combo2, height = 5, width = 8)
+
+# Age with SCR/SRR alignment 
+
+p3 <- readRDS(here("output/dotplot_scr_vs_srr.rds"))
+
+p3   # renders it as-is
+
+bottom_row <- plot_grid(p3, NULL, ncol = 2, rel_widths = c(10, 1),
+                         labels = c("B", ""))
+final <- plot_grid(p_combo2, bottom_row, ncol = 1, labels = c("A", ""))
+final
+
+ggsave(here("figures/suppfig5_scr_srr_agegroup_dotplot.tiff"), final, width = 220, height = 210, units = "mm")
+```
+
+### PCR prevalence per pathogen
+
+```{r}
+#| fig-width: 8
+#| fig-height: 8
+
+pcr_prev_type %>%
+  arrange(community_type2) %>%
+  ggplot(aes(x = community_type2, y = pcr_prevalence, color = community_type2)) +
+  geom_point() +
+  labs(y = "Prevalence",
+       x = "",
+       title = "PCR Prevalence across community types") +
+  scale_color_manual(values = nytpal) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 10),
+    legend.position = "right",
+    panel.background = element_rect(fill = "white"),
+    panel.grid = element_line(color = "grey", linewidth = 0.1)) +
+  geom_errorbar(aes(ymin = lower_ci, ymax = upper_ci), width = 0.1, linewidth = 0.5) +
+  facet_wrap( ~ pathogen, ncol= 3, scales = "free_y")
+```

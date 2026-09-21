@@ -1,0 +1,244 @@
+---
+title: "ECoMiD: Age-based prevalence and cumulative incidence, PCR vs. IgG"
+format:
+  html:
+    self-contained: true
+    toc: true
+    embed-resources: true
+    code-fold: true
+    link-external-newwindow: true
+execute:
+  echo: true
+  warning: false
+  message: false
+editor:
+  markdown:
+    wrap: 72
+---
+
+## File overview
+
+This file summarizes the age-based measures into one final
+figure showing all 4 summary measures side by side: point prevalence and
+Kaplan-Meier cumulative incidence, for both serology (IgG) and PCR. It
+reports Kaplan-Meier diagnostic and sensitivity plots (main vs.
+internal-NA-as-event upper bound; Shigella/EIEC 6-month IgG exclusion
+sensitivity).
+
+
+## System setup
+
+```{r}
+library(here)
+source(here("R", "0-config.R"))
+```
+
+## Read in exported datasets
+
+```{r}
+point_prevalence <- read_csv(here("output/ecomid_point_prevalence_pcr_vs_serology.csv"))
+
+km_main_tidy       <- readRDS(here("output/ecomid_km_main_tidy.rds"))
+km_upper_tidy      <- readRDS(here("output/ecomid_km_upper_tidy.rds"))
+km_unexcluded_tidy <- readRDS(here("output/ecomid_km_unexcluded_tidy.rds"))
+km_main_rounds     <- readRDS(here("output/ecomid_km_main_rounds.rds"))
+
+## Shared styling, consistent with the rest of this workflow
+assay_colors <- c(PCR = "#009E73", IgG = "#CC79A7")
+
+age_axis_breaks <- scale_x_continuous(breaks = c(3, 6, 9, 12, 15, 18, 24))
+
+inset_legend_theme <- theme(
+  legend.position     = c(0.95, 0.98),
+  legend.justification = c(1, 1),
+  legend.background   = element_rect(fill = "white", color = "grey85", linewidth = 0.3)
+)
+```
+
+## Kaplan-Meier diagnostics: main estimate vs. internal-NA-as-event upper bound
+
+```{r}
+## ------------------------------------------------------------------------
+## Cumulative incidence (1 - KM survival), main estimate (solid, with 95%
+## CI ribbon) vs. sensitivity upper bound (dashed) that recodes internal
+## missing rounds as the event instead of as negative. Left as a step
+## function here (not read onto the round grid) since the point of this
+## figure is to see exactly where/when the two assumptions diverge.
+## ------------------------------------------------------------------------
+km_plot_data <- bind_rows(
+  km_main_tidy  %>% select(pathogen, assay, time, cum_inc, ci_low, ci_high, bound),
+  km_upper_tidy %>% select(pathogen, assay, time, cum_inc, bound)
+)
+
+p_km <- ggplot() +
+  geom_ribbon(
+    data = filter(km_plot_data, bound == "Main (internal NA = negative)"),
+    aes(x = time, ymin = ci_low, ymax = ci_high, fill = assay,
+        group = interaction(assay, bound)),
+    alpha = 0.15, color = NA
+  ) +
+  geom_step(
+    data = km_plot_data,
+    aes(x = time, y = cum_inc, color = assay, linetype = bound),
+    linewidth = 0.8
+  ) +
+  facet_wrap(~ pathogen, ncol = 3) +
+  age_axis_breaks +
+  scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1)) +
+  scale_color_manual(values = assay_colors) +
+  scale_fill_manual(values = assay_colors, guide = "none") +
+  labs(
+    x = "Age (months)", y = "Cumulative incidence (1 − KM survival)",
+    color = NULL, linetype = NULL,
+    caption = "Shigella/EIEC 6-month IgG reading excluded (maternal antibody contribution), as for the prevalence figures below."
+  ) +
+  theme_minimal(base_size = 11) +
+  inset_legend_theme +
+  theme(plot.caption = element_text(size = 8, hjust = 0, face = "italic"))
+
+#ggsave(here("figures/km_cumulative_incidence.png"), p_km, width = 11, height = 9, dpi = 300)
+
+p_km
+```
+
+## Kaplan-Meier: main estimate only, read at nominal visit rounds
+
+```{r}
+p_km_main <- ggplot(km_main_rounds, aes(x = time, y = cum_inc, color = assay)) +
+  geom_ribbon(aes(ymin = ci_low, ymax = ci_high, fill = assay),
+              alpha = 0.15, color = NA) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 1.4) +
+  facet_wrap(~ pathogen, ncol = 3) +
+  age_axis_breaks +
+  scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1)) +
+  scale_color_manual(values = assay_colors) +
+  scale_fill_manual(values = assay_colors, guide = "none") +
+  labs(
+    x = "Age (months)", y = "Cumulative incidence (1 − KM survival)",
+    color = NULL,
+    caption = "Kaplan-Meier cumulative incidence read at each nominal visit round (95% CI, Greenwood); Shigella/EIEC 6-month IgG reading excluded (maternal antibody contribution)."
+  ) +
+  theme_minimal(base_size = 11) +
+  inset_legend_theme +
+  theme(plot.caption = element_text(size = 8, hjust = 0, face = "italic"))
+
+#ggsave(here("figures/km_cumulative_incidence_main.png"), p_km_main, width = 11, height = 9, dpi = 300)
+
+p_km_main
+```
+
+## Sensitivity: Shigella/EIEC 6-month IgG exclusion
+
+```{r}
+## How much does excluding the 6-month Shigella/EIEC IgG reading actually
+## change the curve? Focused on Shigella/EIEC IgG since that's the only
+## panel expected to differ; PCR and every other pathogen should be
+## identical between the two lines (a divergence there would flag a bug).
+km_excl_plot_data <- bind_rows(
+  km_main_tidy       %>% select(pathogen, assay, time, cum_inc, bound),
+  km_unexcluded_tidy %>% select(pathogen, assay, time, cum_inc, bound)
+) %>%
+  filter(pathogen == "Shigella/EIEC", assay == "IgG")
+
+p_km_excl_sensitivity <- ggplot(km_excl_plot_data,
+                                 aes(x = time, y = cum_inc, linetype = bound)) +
+  geom_step(color = assay_colors[["IgG"]], linewidth = 0.9) +
+  age_axis_breaks +
+  scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1)) +
+  labs(
+    x = "Age (months)", y = "Cumulative incidence (1 − KM survival)",
+    linetype = NULL,
+    title = "Shigella/EIEC IgG: effect of excluding the 6-month reading"
+  ) +
+  theme_minimal(base_size = 11) +
+  inset_legend_theme
+
+#ggsave(here("figures/km_shigella_exclusion_sensitivity.png"),
+      # p_km_excl_sensitivity, width = 6, height = 5, dpi = 300)
+
+p_km_excl_sensitivity
+```
+
+## Final figure: point prevalence + KM cumulative incidence, PCR vs. IgG
+
+This is the core deliverable for this document: the 4 summary measures
+(point prevalence x {IgG, PCR}, cumulative incidence x {IgG, PCR}) shown
+together per pathogen.
+
+```{r}
+pathogen_order <- c("Cryptosporidium", "Giardia", "E. histolytica", 
+                    "LT-ETEC", "Shigella/EIEC", "Campylobacter", 
+                    "Norovirus GII", "Norovirus GI", "S. enterica")  # <- put your pathogens here in the order you want
+
+prev_long <- bind_rows(
+  point_prevalence %>%
+    transmute(pathogen, assay, timepoint,
+              measure = "Point prevalence", prevalence = point_prev, n = n_tested,
+              ci_low, ci_high),
+  km_main_rounds %>%
+    transmute(pathogen, assay, timepoint = time,
+              measure = "Cumulative incidence", prevalence = cum_inc, n = n_at_risk,
+              ci_low, ci_high)
+) %>%
+  mutate(measure = factor(measure, levels = c("Point prevalence", "Cumulative incidence")))
+
+
+prev_long <- prev_long %>%
+  mutate(pathogen = factor(pathogen, levels = pathogen_order))
+
+p_prev <- ggplot(prev_long, aes(x = timepoint, y = prevalence,
+                                 color = assay, linetype = measure)) +
+  geom_ribbon(aes(ymin = ci_low, ymax = ci_high, fill = assay,
+                  group = interaction(assay, measure)),
+              alpha = 0.15, color = NA) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 1.4) +
+  facet_wrap(~ pathogen, ncol = 3) +
+  age_axis_breaks +
+  scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1)) +
+  scale_color_manual(values = assay_colors) +
+  scale_fill_manual(values = assay_colors, guide = "none") +
+  scale_linetype_manual(values = c("Point prevalence" = "dashed",
+                                    "Cumulative incidence" = "solid")) +
+  labs(
+    x = "Age (months)", y = "Prevalence / Cumulative Incidence",
+    color = NULL, linetype = NULL) + 
+    #caption = "Cumulative incidence estimated via Kaplan-Meier (Greenwood 95% # CI)\nShigella/EIEC 6-month IgG reading excluded (maternal antibody contribution)") +
+  theme_minimal(base_size = 13) +
+  theme(base_size = 12, 
+        plot.caption = element_text(size = 8, hjust = 0, face = "italic"),
+        legend.position = "inside",
+    legend.position.inside = c(0.78, 0.9),
+    legend.background = element_rect(fill = "white", color = "white"))
+
+ggsave(here("figures/fig2_prevalence_point_vs_cumulative.tiff"), p_prev, width = 250, height = 190, units = "mm")
+
+p_prev
+```
+
+## Supporting figure: testing coverage behind each estimate
+
+```{r}
+## No fixed ylim here -- n_at_risk's scale/behavior differs from n_tested,
+## so each panel is left free to scale on its own.
+p_n <- ggplot(prev_long, aes(x = timepoint, y = n,
+                             color = assay, linetype = measure)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 1.4) +
+  facet_wrap(~ pathogen, ncol = 3, scales = "free_y") +
+  age_axis_breaks +
+  scale_color_manual(values = assay_colors) +
+  labs(
+    x = "Age (months)", y = "Children contributing",
+    color = NULL, linetype = NULL,
+    title = "Testing coverage behind each prevalence/incidence estimate",
+    subtitle = "n_tested (point) vs. n_at_risk (cumulative incidence, KM) -- context for the figure above"
+  ) +
+  theme_minimal(base_size = 11) +
+  inset_legend_theme
+
+#ggsave(here("figures/testing_coverage.png"), p_n, width = 11, height = 9, dpi = 300)
+
+p_n
+```

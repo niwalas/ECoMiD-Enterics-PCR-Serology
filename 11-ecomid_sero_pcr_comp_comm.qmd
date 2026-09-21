@@ -1,0 +1,635 @@
+---
+title: "Serology and PCR comparison, by community type"
+subtitle: "Community-type-stratified correlation of serology and PCR summary measures in the ecomid cohort"
+author: "Nikolina Walas (nikolina.walas@ucsf.edu)"
+date: "updated: `r Sys.time()`"
+format:
+  html:
+    self-contained: true
+    toc: true
+    embed-resources: true
+    code-fold: true
+    link-external-newwindow: true
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+## File Overview
+
+This file builds on `9-ecomid_sero_pcr_comp.qmd`. It repeats that file's pathogen-level scatterplots of serology and PCR summary measures, but the Spearman correlation (ρ) shown on each plot is now calculated **separately within each community type** (Esmeraldas, Borbón, Rural) rather than once across all three pooled together. Each plot is faceted by community type, in that order, with that community's ρ (and 95% CI) printed directly in its own panel. The bootstrap used to get a robust standard error for ρ is likewise stratified: children are resampled (with replacement) *within* a community type only, so the uncertainty attached to each community's ρ reflects that community's own children and sample size, not the pooled cohort. (The SE is retained in the summary table at the end of this file; it is left off the plots themselves to keep the panels clean.)
+
+This file does **not** repeat the population-level summary tables/figures found in sections 1) and 2) of `9-ecomid_sero_pcr_comp.qmd` (overall pathogen prevalence, SCR/SRR by community or age group) -- for those, see the original file.
+
+Output from this document includes four community-stratified versions of the original comparison plots (SCR vs. PCR prevalence, SCR vs. seroprevalence, SCR vs. seroreversion rate (SRR), and PCR prevalence vs. seroprevalence), plus one new figure comparing PCR prevalence against **cumulative** (ever-positive) seroprevalence by IgG. The SCR vs. PCR prevalence comparison is reported both with Giardia excluded (used on Plot 1, matching `9-ecomid_sero_pcr_comp.qmd`) and with Giardia included (supplement only, not plotted).
+
+A note on interpretation: each community-specific ρ is estimated from only the 8-9 overlapping pathogens available within that community, so these estimates (and their bootstrap SEs) are noisier than the pooled estimates in the original file and should be interpreted as descriptive/exploratory rather than confirmatory.
+
+### Load packages
+
+```{r}
+library(here)
+source(here("R", "0-config.R"))
+library(purrr) # map_dfr/map_dbl used below for the community-stratified bootstrap
+```
+
+### Read in files
+
+```{r}
+# Ensures a consistent Esmeraldas > Borbon > Rural factor order everywhere in
+# this file. Display text stays plain "Esmeraldas"/"Rural"; "Borbon" is shown
+# as "Borbón" only via the facet labeller in the Plots section (matches
+# nytpal's color key, which uses the unaccented spelling).
+relabel_comm <- function(x) {
+  factor(as.character(x), levels = c("Esmeraldas", "Borbon", "Rural"))
+}
+
+# seroconversion by community type + pathogen
+sero_inc_type <- readRDS(here("output/ecomid_pathogen_comm_sero_inc_3_levels.rds"))  %>%
+  filter(pathogen != "Strongyloides" & pathogen != "T. solium")
+sero_inc_type$community_type2 <- relabel_comm(sero_inc_type$community_type2)
+
+# seroprevalence by community type + pathogen
+sero_prev_type <- readRDS(here("output/ecomid_sero_prev_rates_3_levels.rds"))
+sero_prev_type$community_type2 <- relabel_comm(sero_prev_type$community_type2)
+
+# pcr prevalence by community type + pathogen
+pcr_prev_type <- readRDS(here("output/ecomid_pcr_prev_by_community_3_levels.rds"))
+pcr_prev_type$community_type2 <- relabel_comm(pcr_prev_type$community_type2)
+
+# seroreversion rate by community type + pathogen
+sero_rev_type <- readRDS(here("output/ecomid_pathogen_comm_sero_rev_3_levels.rds")) %>%
+  filter(pathogen != "Strongyloides" & pathogen != "T. solium")
+sero_rev_type$community_type2 <- relabel_comm(sero_rev_type$community_type2)
+
+# raw measures (by timepoint) -- individual-level, used for the community-stratified bootstrap
+pcr_all <- readRDS(here("data","ecomid_pcr_analysis_data_2026-08-12.rds"))
+sero_all <- read_csv(here("..","..",
+                      "Data","serology","final","ecomid_serology_datasets",
+                      "ecomid_sero_antigen_seropos_long_enteric_cutoffs_2026-08-26.csv")) %>%
+  mutate(community_type = ifelse(str_detect(community_type, "Rural"), "Rural", community_type))
+
+# seroconversion rate (individual level)
+sero_conv <- readRDS(here("output/ecomid_sero_conv_tbl.rds")) %>%
+  filter(pathogen != "Strongyloides" &
+           pathogen != "T. solium")
+
+# seroreversion rate (individual level)
+sero_rev <- readRDS(here("output/ecomid_sero_rev_tbl.rds")) %>%
+  filter(pathogen != "Strongyloides" &
+           pathogen != "T. solium")
+
+# tidy up community_type on the individual-level pcr data, and restrict to the
+# overlap pathogen set (same steps as 9-ecomid_sero_pcr_comp.qmd)
+pcr_all$community_type <- as.character(pcr_all$community_type)
+pcr_all <- pcr_all %>% mutate(community_type = ifelse(str_detect(community_type, "Rural"), "Rural", community_type))
+pcr_all$community_type <- factor(pcr_all$community_type, levels = c("Esmeraldas", "Borbon", "Rural"))
+pcr_all <- pcr_all %>% filter(pathogen %in% sero_conv$pathogen)
+```
+
+# 1) Create comparison data-frames (community level)
+
+These are the same pathogen x community-type summary data-frames used for plotting in `9-ecomid_sero_pcr_comp.qmd` (built from the pre-computed community-level rate/prevalence tables read in above). One new data-frame (`cum_sero_prev_type` / `d7`) is added for the cumulative-IgG-seroprevalence comparison. `community_type2` is re-leveled to Esmeraldas > Borbon > Rural immediately after every join, as a defensive measure so the order can't silently drift back to alphabetical.
+
+```{r}
+# seroprevalence, restricted to pathogens overlapping with pcr
+d1 <- sero_prev_type %>%
+  select(pathogen, community_type2, sero_prevalence, lower_ci, upper_ci, n_total) %>%
+  filter(pathogen %in% pcr_prev_type$pathogen)
+
+# seroconversion rate, restricted to pathogens overlapping with pcr
+d1b <- sero_inc_type %>%
+  select(pathogen, community_type2, ir_per_100) %>%
+  filter(pathogen %in% pcr_prev_type$pathogen)
+
+# pcr prevalence, restricted to the overlap set defined by d1
+d2 <- pcr_prev_type %>%
+  select(pathogen, community_type2, pcr_prevalence, lower_ci, upper_ci, n_total) %>%
+  rename(lower_ci_pcr = lower_ci,
+         upper_ci_pcr = upper_ci) %>%
+  filter(pathogen %in% d1$pathogen)
+
+pathogen_levels <- c("Campylobacter", "Cryptosporidium", "E. histolytica", "Giardia",
+                      "LT-ETEC", "Norovirus GI", "Norovirus GII", "S. enterica", "Shigella/EIEC")
+
+# --- Plot 1 data: SCR + PCR prevalence ---
+d3b <- left_join(d1b, d2, by = c("pathogen", "community_type2"))
+d3b$community_type2 <- relabel_comm(d3b$community_type2)
+d3b$pathogen <- factor(d3b$pathogen, levels = pathogen_levels)
+
+# --- Plot 2 data: SCR + seroprevalence ---
+d4 <- left_join(d1, d1b, by = c("pathogen", "community_type2"))
+d4$community_type2 <- relabel_comm(d4$community_type2)
+d4$pathogen <- factor(d4$pathogen, levels = pathogen_levels)
+
+# --- Plot 3 data: SCR + SRR ---
+d5 <- left_join(d1b %>% rename(scr_per_100 = ir_per_100),
+                sero_rev_type %>% select(pathogen, community_type2, ir_per_100) %>%
+                  rename(srr_per_100 = ir_per_100), by = c("pathogen", "community_type2"))
+d5$community_type2 <- relabel_comm(d5$community_type2)
+d5$pathogen <- factor(d5$pathogen, levels = pathogen_levels)
+
+# --- Plot 4 data: PCR prevalence + seroprevalence (new pairing) ---
+d3 <- left_join(d1 %>% select(-n_total), d2, by = c("pathogen", "community_type2"))
+d3$community_type2 <- relabel_comm(d3$community_type2)
+d3$pathogen <- factor(d3$pathogen, levels = pathogen_levels)
+
+# --- Plot 5 data: PCR prevalence + CUMULATIVE (ever-positive) IgG seroprevalence (new measure) ---
+# "Cumulative" = proportion of children ever IgG-positive for a pathogen at any visit,
+# among children ever tested for that pathogen -- same ever-positive/ever-tested logic
+# used in prevalence_pcr_vs_serology.R, applied here per pathogen x community type.
+cum_sero_prev_type <- sero_all %>%
+  filter(pathogen %in% d1$pathogen) %>%
+  group_by(childid, community_type, pathogen) %>%
+  summarise(
+    ever_tested = as.numeric(any(!is.na(seropos))),
+    ever_pos    = as.numeric(any(seropos == 1, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  filter(ever_tested == 1) %>%
+  group_by(pathogen, community_type) %>%
+  summarise(
+    n_pos   = sum(ever_pos),
+    n_total = n(),
+    .groups = "drop"
+  ) %>%
+  rowwise() %>%
+  mutate(ci_lo = binom.test(n_pos, n_total)$conf.int[1],
+         ci_hi = binom.test(n_pos, n_total)$conf.int[2]) %>%
+  ungroup() %>%
+  mutate(cum_prevalence = n_pos / n_total) %>%
+  rename(community_type2 = community_type, lower_ci_cum = ci_lo, upper_ci_cum = ci_hi)
+
+cum_sero_prev_type$community_type2 <- relabel_comm(cum_sero_prev_type$community_type2)
+
+d7 <- left_join(
+  d2 %>% select(pathogen, community_type2, pcr_prevalence, lower_ci_pcr, upper_ci_pcr, n_total),
+  cum_sero_prev_type %>% select(pathogen, community_type2, cum_prevalence, lower_ci_cum, upper_ci_cum),
+  by = c("pathogen", "community_type2")
+)
+d7$community_type2 <- relabel_comm(d7$community_type2)
+d7$pathogen <- factor(d7$pathogen, levels = pathogen_levels)
+```
+
+# 2) Community-stratified bootstrap correlations (robust SE)
+
+## Set-up
+
+```{r}
+# ============================================================
+# SUMMARY FUNCTIONS (individual-level -> pathogen-level within ONE community)
+# ============================================================
+
+summarize_scr <- function(df) {
+  df %>%
+    group_by(pathogen) %>%
+    summarise(
+      total_seroconversions = sum(seroconversion, na.rm = TRUE),
+      total_pt_years = sum(person_time_years, na.rm = TRUE),
+      incidence_rate_per_year = total_seroconversions / total_pt_years,
+      .groups = "drop"
+    )
+}
+
+summarize_srr <- function(df) {
+  df %>%
+    group_by(pathogen) %>%
+    summarise(
+      total_seroreversions = sum(seroreversion, na.rm = TRUE),
+      total_pt_years = sum(person_time_years, na.rm = TRUE),
+      sr_rate_per_year = total_seroreversions / total_pt_years,
+      .groups = "drop"
+    )
+}
+
+summarize_pcr <- function(df) {
+  df %>%
+    group_by(pathogen) %>%
+    summarise(
+      n_pos = sum(pcrpos, na.rm = TRUE),
+      n_total = sum(!is.na(pcrpos)),
+      pcr_prev = n_pos / n_total,
+      .groups = "drop"
+    )
+}
+
+summarize_serop <- function(df) {
+  df %>%
+    group_by(pathogen) %>%
+    summarise(
+      n_pos = sum(seropos, na.rm = TRUE),
+      n_total = sum(!is.na(seropos)),
+      prev = n_pos / n_total,
+      .groups = "drop"
+    )
+}
+
+# ever-positive (cumulative) summary -- needs a draw_id column so that a child
+# drawn twice in a bootstrap replicate is counted as two independent
+# observations, not collapsed into one
+summarize_cum_serop <- function(df) {
+  df %>%
+    group_by(draw_id, pathogen) %>%
+    summarise(
+      ever_tested = as.numeric(any(!is.na(seropos))),
+      ever_pos    = as.numeric(any(seropos == 1, na.rm = TRUE)),
+      .groups = "drop"
+    ) %>%
+    group_by(pathogen) %>%
+    summarise(
+      n_ever_tested = sum(ever_tested),
+      n_ever_pos    = sum(ever_pos),
+      cum_prev      = n_ever_pos / n_ever_tested,
+      .groups = "drop"
+    )
+}
+
+# ============================================================
+# COMMUNITY-STRATIFIED BOOTSTRAP ENGINE (standard sum-ratio measures)
+# ============================================================
+# Resamples childids WITH REPLACEMENT, separately within each community type,
+# recomputes the pathogen-level summaries and Spearman rho on each replicate,
+# then reports: observed rho, bootstrap SE (SD of replicate rhos), and the
+# 95% percentile CI -- all specific to that one community.
+
+communities <- c("Esmeraldas", "Borbon", "Rural")
+comm_n <- c(Esmeraldas = 85, Borbon = 108, Rural = 177)
+
+run_boot_corr <- function(df1, df2, summarize1, summarize2,
+                          val1, val2, exclude_pathogen = NULL,
+                          B = 2000, seed = 239) {
+
+  out <- map_dfr(communities, function(comm) {
+
+    d1_comm <- df1 %>% filter(community_type == comm)
+    d2_comm <- df2 %>% filter(community_type == comm)
+
+    all_ids <- union(d1_comm$childid, d2_comm$childid)
+    n_draw  <- unname(comm_n[comm])
+
+    d1c <- if (!is.null(exclude_pathogen)) d1_comm %>% filter(pathogen != exclude_pathogen) else d1_comm
+    d2c <- if (!is.null(exclude_pathogen)) d2_comm %>% filter(pathogen != exclude_pathogen) else d2_comm
+
+    one_boot <- function() {
+      boot_tbl <- tibble(childid = sample(all_ids, size = n_draw, replace = TRUE))
+
+      r1 <- boot_tbl %>% left_join(d1c, by = "childid", relationship = "many-to-many") %>% summarize1()
+      r2 <- boot_tbl %>% left_join(d2c, by = "childid", relationship = "many-to-many") %>% summarize2()
+
+      merged <- inner_join(r1, r2, by = "pathogen")
+      if (nrow(merged) < 3) return(NA_real_)
+      cor(merged[[val1]], merged[[val2]], method = "spearman")
+    }
+
+    set.seed(seed)
+    boot_r <- replicate(B, one_boot())
+
+    obs1 <- summarize1(d1c)
+    obs2 <- summarize2(d2c)
+    merged_obs <- inner_join(obs1, obs2, by = "pathogen")
+    observed_rho <- cor(merged_obs[[val1]], merged_obs[[val2]], method = "spearman")
+
+    tibble(
+      community_type2 = comm,
+      n_pathogen_pairs = nrow(merged_obs),
+      rs    = observed_rho,
+      se    = sd(boot_r, na.rm = TRUE),
+      rs_lo = unname(quantile(boot_r, 0.025, na.rm = TRUE)),
+      rs_hi = unname(quantile(boot_r, 0.975, na.rm = TRUE)),
+      n_na_boot = sum(is.na(boot_r))
+    )
+  })
+
+  out %>%
+    mutate(
+      # explicit factor + level order so this always facets/orders as
+      # Esmeraldas, Borbon, Rural -- regardless of how ggplot would otherwise
+      # combine this column with the main plotting data's community_type2
+      community_type2 = factor(community_type2, levels = c("Esmeraldas", "Borbon", "Rural")),
+      # sprintf (not round()) so every value keeps exactly 2 decimal places on
+      # display -- round() alone drops trailing zeros (e.g. 0.30 -> "0.3"),
+      # which looks inconsistent next to values like "0.45" on the same plot
+      final_rho = paste0(sprintf("%.2f", rs), " (SE ", sprintf("%.2f", se), "; 95% CI: ",
+                          sprintf("%.2f", rs_lo), ", ", sprintf("%.2f", rs_hi), ")"),
+      # SE-free version used for the on-plot annotation (kept in final_rho for the summary table)
+      plot_rho_label = paste0(sprintf("%.2f", rs), " (95% CI: ", sprintf("%.2f", rs_lo), ", ", sprintf("%.2f", rs_hi), ")")
+    )
+}
+
+# ============================================================
+# COMMUNITY-STRATIFIED BOOTSTRAP ENGINE (cumulative/ever-positive measure)
+# ============================================================
+# Same idea as run_boot_corr(), but assigns each bootstrap draw a unique
+# draw_id BEFORE joining, since the ever-positive summary needs to treat a
+# child drawn twice as two separate observations (sums are invariant to this,
+# but any()-based "ever positive" logic is not).
+
+run_boot_corr_cumulative <- function(pcr_df, sero_df, B = 2000, seed = 239) {
+
+  out <- map_dfr(communities, function(comm) {
+
+    pcr_c  <- pcr_df  %>% filter(community_type == comm)
+    sero_c <- sero_df %>% filter(community_type == comm)
+
+    all_ids <- union(pcr_c$childid, sero_c$childid)
+    n_draw  <- unname(comm_n[comm])
+
+    one_boot <- function() {
+      boot_tbl <- tibble(childid = sample(all_ids, size = n_draw, replace = TRUE)) %>%
+        mutate(draw_id = row_number())
+
+      pcr_r  <- boot_tbl %>% left_join(pcr_c,  by = "childid", relationship = "many-to-many") %>% summarize_pcr()
+      sero_r <- boot_tbl %>% left_join(sero_c, by = "childid", relationship = "many-to-many") %>% summarize_cum_serop()
+
+      merged <- inner_join(pcr_r, sero_r, by = "pathogen")
+      if (nrow(merged) < 3) return(NA_real_)
+      cor(merged$pcr_prev, merged$cum_prev, method = "spearman")
+    }
+
+    set.seed(seed)
+    boot_r <- replicate(B, one_boot())
+
+    pcr_obs  <- pcr_c  %>% summarize_pcr()
+    sero_obs <- sero_c %>% mutate(draw_id = childid) %>% summarize_cum_serop() # each real child = its own draw
+    merged_obs <- inner_join(pcr_obs, sero_obs, by = "pathogen")
+    observed_rho <- cor(merged_obs$pcr_prev, merged_obs$cum_prev, method = "spearman")
+
+    tibble(
+      community_type2 = comm,
+      n_pathogen_pairs = nrow(merged_obs),
+      rs    = observed_rho,
+      se    = sd(boot_r, na.rm = TRUE),
+      rs_lo = unname(quantile(boot_r, 0.025, na.rm = TRUE)),
+      rs_hi = unname(quantile(boot_r, 0.975, na.rm = TRUE))
+    )
+  }) %>%
+    mutate(
+      community_type2 = factor(community_type2, levels = c("Esmeraldas", "Borbon", "Rural")),
+      final_rho = paste0(sprintf("%.2f", rs), " (SE ", sprintf("%.2f", se), "; 95% CI: ",
+                          sprintf("%.2f", rs_lo), ", ", sprintf("%.2f", rs_hi), ")"),
+      plot_rho_label = paste0(sprintf("%.2f", rs), " (95% CI: ", sprintf("%.2f", rs_lo), ", ", sprintf("%.2f", rs_hi), ")")
+    )
+}
+```
+
+## A) SCR + PCR prevalence, Giardia excluded (used on Plot 1)
+
+```{r}
+comm_corr_p1 <- run_boot_corr(sero_conv, pcr_all, summarize_scr, summarize_pcr,
+                               val1 = "incidence_rate_per_year", val2 = "pcr_prev",
+                               exclude_pathogen = "Giardia")
+comm_corr_p1
+```
+
+## A2) SCR + PCR prevalence, Giardia included (supplement -- not plotted)
+
+```{r}
+comm_corr_p1_giardia_incl <- run_boot_corr(sero_conv, pcr_all, summarize_scr, summarize_pcr,
+                                            val1 = "incidence_rate_per_year", val2 = "pcr_prev",
+                                            exclude_pathogen = NULL)
+comm_corr_p1_giardia_incl
+```
+
+## B) SCR + seroprevalence
+
+```{r}
+comm_corr_p2 <- run_boot_corr(sero_conv, sero_all, summarize_scr, summarize_serop,
+                               val1 = "incidence_rate_per_year", val2 = "prev")
+comm_corr_p2
+```
+
+## C) SCR + SRR
+
+```{r}
+comm_corr_p3 <- run_boot_corr(sero_conv, sero_rev, summarize_scr, summarize_srr,
+                               val1 = "incidence_rate_per_year", val2 = "sr_rate_per_year")
+comm_corr_p3
+```
+
+## D) PCR prevalence + seroprevalence (new pairing)
+
+```{r}
+comm_corr_p4 <- run_boot_corr(pcr_all, sero_all, summarize_pcr, summarize_serop,
+                               val1 = "pcr_prev", val2 = "prev")
+comm_corr_p4
+```
+
+## E) PCR prevalence + cumulative (ever-positive) seroprevalence, IgG (new figure)
+
+```{r}
+comm_corr_p5 <- run_boot_corr_cumulative(pcr_all, sero_all)
+comm_corr_p5
+```
+
+# 3) Plots
+
+Each plot is faceted by community type (Esmeraldas / Borbón / Rural, in that order), colored by pathogen (same `my_colors` palette as `9-ecomid_sero_pcr_comp.qmd`), with that community's ρ (95% CI, no SE) printed directly in its own panel. Facet strips are tinted with the same `nytpal` community-type colors used elsewhere in that file, and labelled "Borbón" (with the accent) even though the underlying grouping value stays "Borbon" to match `nytpal`'s color key. Points are uniform size -- community is no longer encoded by point size since it's now the facet itself.
+
+```{r}
+my_colors <- c(
+  "Campylobacter" = "darkgoldenrod1",
+  "Cryptosporidium" = "cornflowerblue",
+  "S. enterica" = "darkseagreen",
+  "Shigella/EIEC" = "darkgreen",
+  "E. histolytica" = "chocolate",
+  "Norovirus GI" = "tan",
+  "Norovirus GII" = "deeppink3",
+  "LT-ETEC" = "blue4",
+  "Giardia" = "grey70"
+)
+
+base_theme <- theme(text = element_text(size = 13),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  axis.line = element_line(color = "black"),
+  axis.ticks = element_line(color = "black"),
+  axis.text.x = element_text(size = 12),
+  axis.text.y = element_text(size = 12),
+  legend.position = "right",
+  panel.background = element_rect(fill = "white"),
+  panel.grid = element_line(color = "grey", linewidth = 0.1),
+  strip.text = element_text(face = "bold", size = 12))
+
+# facet strip label text: display "Borbón" (accented) plus each community's n,
+# even though the underlying community_type2 value stays "Borbon" (matches
+# nytpal's color key)
+comm_labeller <- ggplot2::as_labeller(c(
+  "Esmeraldas" = "Esmeraldas (n=85)",
+  "Borbon" = "Borbón (n=108)",
+  "Rural" = "Rural (n=177)"
+))
+
+# facet strip fill colors, in the same order as the community_type2 factor
+# levels (Esmeraldas, Borbon, Rural) -- ties the facet strips to the same
+# nytpal community-type palette used throughout 9-ecomid_sero_pcr_comp.qmd.
+# NOTE: if nytpal's key for Esmeraldas is actually "city of Esmeraldas" rather
+# than plain "Esmeraldas", this lookup will return NA and that strip will come
+# out uncolored -- if that happens, change the "Esmeraldas" below back to
+# "city of Esmeraldas" (this is only a lookup key, it won't affect any labels).
+# (If your ggh4x version doesn't have facet_wrap2()/strip_themed(), drop
+# `strip = comm_strip` below and use plain facet_wrap() instead.)
+comm_strip <- ggh4x::strip_themed(
+  background_x = ggh4x::elem_list_rect(fill = nytpal[c("Esmeraldas", "Borbon", "Rural")])
+)
+```
+
+## Plot 1: SCR vs. PCR prevalence
+
+```{r}
+#| fig-width: 13
+#| fig-height: 6
+
+p1 <- d3b %>% ggplot(aes(x = pcr_prevalence*100, y = ir_per_100, color = pathogen)) +
+  geom_point(size = 3, alpha = 0.7) +
+  labs(x = "PCR prevalence (%)",
+       y = "Seroconversion rate (per 100 py)",
+       caption = "Giardia excluded from ρ") +
+  scale_color_manual(values = my_colors, name = "") +
+  scale_x_continuous(breaks = seq(0, 30, by = 5), limits = c(0, 30)) +
+  base_theme +
+  coord_cartesian(ylim = c(0, 200)) +
+  geom_text(
+    data = comm_corr_p1,
+    aes(x = -Inf, y = Inf, label = paste0("ρ = ", plot_rho_label)),
+    inherit.aes = FALSE,
+    hjust = -0.06, vjust = 1.4, size = 4, color = "black", fontface = "italic"
+  ) +
+  ggh4x::facet_wrap2(~ community_type2, ncol = 3, strip = comm_strip, labeller = comm_labeller)
+
+p1
+```
+
+## Plot 2: SCR vs. seroprevalence
+
+```{r}
+#| fig-width: 13
+#| fig-height: 6
+
+p2 <- d4 %>% ggplot(aes(x = sero_prevalence*100, y = ir_per_100, color = pathogen)) +
+  geom_point(size = 3, alpha = 0.7) +
+  labs(x = "Seroprevalence (%)",
+       y = "Seroconversion rate (per 100 py)") +
+  scale_color_manual(values = my_colors, name = "") +
+  base_theme +
+  xlim(0, 60) +
+  coord_cartesian(ylim = c(0, 200)) +
+  geom_text(
+    data = comm_corr_p2,
+    aes(x = -Inf, y = Inf, label = paste0("ρ = ", plot_rho_label)),
+    inherit.aes = FALSE,
+    hjust = -0.06, vjust = 1.4, size = 4, color = "black", fontface = "italic"
+  ) +
+  ggh4x::facet_wrap2(~ community_type2, ncol = 3, strip = comm_strip, labeller = comm_labeller)
+
+p2
+```
+
+## Plot 3: SCR vs. SRR
+
+```{r}
+#| fig-width: 13
+#| fig-height: 6
+
+p3 <- d5 %>% ggplot(aes(x = srr_per_100, y = scr_per_100, color = pathogen)) +
+  geom_point(size = 3, alpha = 0.7) +
+  labs(x = "Seroreversion rate (per 100 py)",
+       y = "Seroconversion rate (per 100 py)") +
+  scale_color_manual(values = my_colors, name = "") +
+  base_theme +
+  scale_x_continuous(limits = c(0, 300), breaks = seq(0, 300, by = 50)) +
+  coord_cartesian(ylim = c(0, 200), clip = "off") +
+  geom_text(
+    data = comm_corr_p3,
+    aes(x = -Inf, y = Inf, label = paste0("ρ = ", plot_rho_label)),
+    inherit.aes = FALSE,
+    hjust = -0.06, vjust = 1.4, size = 4, color = "black", fontface = "italic"
+  ) +
+  ggh4x::facet_wrap2(~ community_type2, ncol = 3, strip = comm_strip, labeller = comm_labeller)
+
+p3
+```
+
+## Plot 4: PCR prevalence vs. seroprevalence
+
+```{r}
+#| fig-width: 13
+#| fig-height: 6
+
+p4 <- d3 %>% ggplot(aes(x = pcr_prevalence*100, y = sero_prevalence*100, color = pathogen)) +
+  geom_point(size = 3, alpha = 0.7) +
+  labs(x = "PCR prevalence (%)",
+       y = "Seroprevalence (%)") +
+  scale_color_manual(values = my_colors, name = "") +
+  base_theme +
+  scale_x_continuous(breaks = seq(0, 30, by = 5), limits = c(0, 30)) +
+  coord_cartesian(ylim = c(0, 65)) +
+  geom_text(
+    data = comm_corr_p4,
+    aes(x = -Inf, y = Inf, label = paste0("ρ = ", plot_rho_label)),
+    inherit.aes = FALSE,
+    hjust = -0.06, vjust = 1.4, size = 4, color = "black", fontface = "italic"
+  ) +
+  ggh4x::facet_wrap2(~ community_type2, ncol = 3, strip = comm_strip, labeller = comm_labeller)
+
+p4
+```
+
+## Plot 5: PCR prevalence vs. cumulative seroprevalence, IgG (new figure)
+
+```{r}
+#| fig-width: 13
+#| fig-height: 6
+
+p5 <- d7 %>% ggplot(aes(x = pcr_prevalence*100, y = cum_prevalence*100, color = pathogen)) +
+  geom_point(size = 3, alpha = 0.7) +
+  labs(x = "PCR prevalence (%)",
+       y = "Cumulative seroprevalence, IgG (%)",
+       title = "PCR prevalence vs. cumulative (ever-positive) IgG seroprevalence") +
+  scale_color_manual(values = my_colors, name = "") +
+  base_theme +
+  scale_x_continuous(breaks = seq(0, 30, by = 5), limits = c(0, 30)) +
+  coord_cartesian(ylim = c(0, 100)) +
+  geom_text(
+    data = comm_corr_p5,
+    aes(x = -Inf, y = Inf, label = paste0("ρ = ", plot_rho_label)),
+    inherit.aes = FALSE,
+    hjust = -0.06, vjust = 1.4, size = 4, color = "black", fontface = "italic"
+  ) +
+  ggh4x::facet_wrap2(~ community_type2, ncol = 3, strip = comm_strip, labeller = comm_labeller)
+
+p5
+```
+
+## Compile plots together
+
+```{r}
+together <- wrap_plots(p1, p2, p3, ncol = 1) +
+  plot_layout(guides = "collect") +
+  plot_annotation(tag_levels = list(c("A)", "B)", "C)"))) &
+  theme(plot.tag = element_text(size = 16, face = "bold"),
+        legend.position = "right")
+
+together
+
+ggsave(here("figures/suppfig8_scatterplot_spearman_community.tiff"), together, height = 12, width = 10)
+#ggsave(here("figures/pcr_vs_cumulative_igg_community.tiff"), p5, height = 6, width = 13)
+```
+
+# 4) Summary table of community-type correlations
+
+```{r}
+corr_summary <- bind_rows(
+  comm_corr_p1 %>% mutate(comparison = "SCR vs. PCR prevalence (Giardia excluded)"),
+  comm_corr_p1_giardia_incl %>% mutate(comparison = "SCR vs. PCR prevalence (Giardia included)"),
+  comm_corr_p2 %>% mutate(comparison = "SCR vs. seroprevalence"),
+  comm_corr_p3 %>% mutate(comparison = "SCR vs. SRR"),
+  comm_corr_p4 %>% mutate(comparison = "PCR prevalence vs. seroprevalence"),
+  comm_corr_p5 %>% mutate(comparison = "PCR prevalence vs. cumulative seroprevalence (IgG)")
+) %>%
+  select(comparison, community_type2, n_pathogen_pairs, rs, se, rs_lo, rs_hi, final_rho)
+
+corr_summary
+
+writexl::write_xlsx(corr_summary, here("output/supp_table_community_correlations.xlsx"))
+```
