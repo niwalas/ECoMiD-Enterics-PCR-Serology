@@ -1,4 +1,3 @@
-
 ## Study Overview
 
 The ECoMiD (Enteric Cohort Study of Microbiomes and Infectious Diseases) birth 
@@ -10,7 +9,8 @@ This pipeline compares two approaches to measuring enteric pathogen exposure in 
 across 9 enteric pathogens from birth to 24 months of age. 
 
 Analyses include seroprevalence, seroconversion and seroreversion rates, 
-PCR prevalence, PCR/IgG concordance, and measures of association by community type.
+PCR prevalence, PCR/IgG concordance, cumulative incidence (Kaplan-Meier), 
+and measures of association by community type.
 
 > **Principal Investigator:** Ben Arnold  
 > **Lead Analyst:** Nikolina Walas (nikolina.walas@ucsf.edu)
@@ -20,26 +20,32 @@ PCR prevalence, PCR/IgG concordance, and measures of association by community ty
 ```
 ecomid_pcr-serology/
 ├── R/
-│   ├── 0-config.R                          # Shared libraries and color palettes
+│   ├── 0-config.R                              # Shared libraries, helper functions, color palettes
 │   ├── 1-ecomid_table1.qmd
 │   ├── 2-ecomid_map_popdens.Qmd
 │   ├── 3-ecomid_process-pcr-data.Qmd
 │   ├── 4-ecomid_pcr_prev.qmd
 │   ├── 5-ecomid_seroincidence.qmd
 │   ├── 6-ecomid_seroreversion.qmd
-│   ├── 7-ecomid_seropos_thresh_suppfig.qmd
-│   ├── 8-ecomid_serology_corr.qmd
-│   ├── 9-ecomid_sero_pcr_comp.qmd
-│   ├── 10-ecomid_mfi_spaghetti_plots.qmd
-│   ├── 11-ecomid_pathprev_by_age_assay.qmd
-│   ├── 12-ecomid_pathprev_by_age_urbanicity.qmd
-│   ├── 13-ecomid_moa_calculation.qmd
-│   ├── 14-ecomid_moa_figure_creation.qmd
-│   └── 15-ecomid_giardia_analysis_suppfig.qmd
-├── data/                                   # Not included (see Data Availability)
-├── output/                                 # Intermediate .rds/.csv files
-└── figures/                                # All saved figures
+│   ├── 7-ecomid_cumulative_incidence_data.qmd
+│   ├── 8-ecomid_seropos_thresh_suppfig.qmd
+│   ├── 9-ecomid_serology_corr.qmd
+│   ├── 10-ecomid_dotplot_correlations.qmd
+│   ├── 11-ecomid_sero_pcr_comp_comm.qmd
+│   ├── 12-ecomid_sero_pcr_summary.qmd
+│   ├── 13-ecomid_age_based_visualization.qmd
+│   ├── 14-ecomid_seroprev_by_age_urbanicity.qmd
+│   ├── 15-ecomid_mfi_spaghetti_plots.qmd
+│   ├── 16-ecomid_rank_ordering.qmd
+│   ├── 17-ecomid_moa_calculation.qmd
+│   ├── 18-ecomid_moa_figure_creation.qmd
+│   └── 19-ecomid_giardia_analysis_suppfig.qmd
+├── data/                                       # Not included (see Data Availability)
+├── output/                                     # Intermediate .rds/.csv/.xlsx files
+└── figures/                                    # All saved figures
 ```
+
+Each `.qmd`/`.Qmd` script has a rendered, self-contained `.html` report alongside it in `R/`.
 
 ---
 
@@ -54,23 +60,30 @@ Raw data are not publicly available due to human subjects research protections a
 Scripts were developed in **R 4.4** using Quarto. Key packages are loaded centrally in `0-config.R`. No `renv` lockfile is included; install packages manually as needed.
 
 **Loaded in `0-config.R`:**
-`here`, `tidyverse`, `kableExtra`, `skimr`, `broom`, `readxl`, `openxlsx`, `patchwork`, `viridis`, `cowplot`, `RColorBrewer`, `ggtext`, `ggh4x`, `sandwich`, `lmtest`
+`here`, `tidyverse`, `kableExtra`, `skimr`, `broom`, `readxl`, `writexl`, `openxlsx`, `ggrepel`, `forcats`, `scales`, `gt`, `survival`, `patchwork`, `viridis`, `cowplot`, `RColorBrewer`, `ggtext`, `ggh4x`, `corrplot`, `ggcorrplot`, `table1`, `sandwich`, `lmtest`
 
 **Loaded locally in individual scripts:**
-`table1`, `corrplot`, `ggcorrplot`, `writexl`, `sf`, `raster`, `ggspatial`, `rnaturalearth`
+`sf`, `raster`, `ggspatial`, `rnaturalearth` (script 2, study area map)
 
 ---
 
 ## How to Run
 
-Scripts must be run in numerical order (1–15). Script 3 processes raw PCR data and must be run before scripts 4–15. Script 5 generates the seroconversion table required by scripts 1, 9, 10, 13, and 14. Script 10 generates the PCR/IgG concordance classification required by script 15.
+Scripts must be run in numerical order (0–19); the numbering follows the dependency chain:
+
+- **Script 3** processes raw GPP + TAC PCR data into the harmonized analysis dataset (`data/ecomid_pcr_analysis_data_2026-08-12.rds`). It must be run before any script that reads that dataset: **4, 7, 15, 17, 19**.
+- **Scripts 4, 5, and 6** produce the PCR prevalence, seroincidence/seroconversion, and seroreversion summary tables (including the 3-level community classification) consumed by **scripts 10–12 and 16–18**.
+- **Script 7** produces the point-prevalence and cumulative-incidence (Kaplan-Meier) datasets required by **scripts 10 and 13**.
+- **Script 10** produces `output/dotplot_scr_vs_srr.rds`, read by **script 12**.
+- **Script 15** generates the PCR/IgG concordance classification (`output/ecomid_seropos_pcr_alltargets.rds`) required by **script 19**.
+- **Script 17** generates the measures-of-association estimates (SCRR, prevalence ratios) required by **script 18**.
 
 ```r
 # All scripts source the shared config at the top:
 source(here("R", "0-config.R"))
 ```
 
-Render each `.qmd` file using Quarto or RStudio. The working directory should be set to the project root.
+Render each `.qmd`/`.Qmd` file using Quarto or RStudio. The working directory should be set to the project root.
 
 ---
 
@@ -78,22 +91,26 @@ Render each `.qmd` file using Quarto or RStudio. The working directory should be
 
 | Script | Purpose | Key Outputs |
 |--------|---------|-------------|
-| `0-config.R` | Shared libraries, color palettes | — |
-| `1-ecomid_table1.qmd` | Table 1: participant characteristics by community | `output/table1.csv` |
-| `2-ecomid_map_popdens.Qmd` | Two-panel study area map with population density | `figures/ecomid-map-population-density.png` |
-| `3-ecomid_process-pcr-data.Qmd` | Process raw GPP + TAC PCR data; harmonize pathogen names | `data/ecomid_pcr_analysis_data_*.rds` |
-| `4-ecomid_pcr_prev.qmd` | PCR prevalence overall and by community (cluster-robust SEs) | `output/ecomid_pcr_prev_by_community_3_levels.rds` |
-| `5-ecomid_seroincidence.qmd` | Seroprevalence and seroconversion rates with bootstrap CIs | `output/ecomid_pathogen_comm_sero_inc_3_levels.rds` |
-| `6-ecomid_seroreversion.qmd` | Seroreversion rates with bootstrap CIs | `output/ecomid_pathogen_comm_sero_rev_3_levels.rds` |
-| `7-ecomid_seropos_thresh_suppfig.qmd` | Supplemental figure: IgG MFI distributions and seropositivity thresholds | `figures/plot_igg_dists_stackedbar.tiff` |
-| `8-ecomid_serology_corr.qmd` | Pearson correlation heatmap of antigen MFI values | `figures/serology_antigen_corr_plot.tiff` |
-| `9-ecomid_sero_pcr_comp.qmd` | Spearman ρ scatter plots: SCR vs. PCR prevalence and seroprevalence | `figures/scatterplot_spearman.tiff` |
-| `10-ecomid_mfi_spaghetti_plots.qmd` | Longitudinal IgG trajectories by PCR/IgG concordance status | `output/ecomid_seropos_pcr_alltargets.rds` |
-| `11-ecomid_pathprev_by_age_assay.qmd` | Prevalence by age (months), PCR vs. IgG, faceted by pathogen | `figures/age_based_prevalence.tiff` |
-| `12-ecomid_pathprev_by_age_urbanicity.qmd` | IgG seroprevalence by age and community type | `figures/age_based_igg_prevalence_byurbanicity.tiff` |
-| `13-ecomid_moa_calculation.qmd` | Log-binomial/modified Poisson PCR prevalence ratios; Poisson SCRR | `output/ecomid_scrr.rds`, `output/ecomid_pr.rds` |
-| `14-ecomid_moa_figure_creation.qmd` | Master composite figure: SCR, PCR prevalence, SCRR, PRR by pathogen class | `figures/moa_large_vertical.tiff` |
-| `15-ecomid_giardia_analysis_suppfig.qmd` | Giardia PCR+/IgG− discrepancy: TAC CT values and GPP MFI by IgG status | `figures/supp_giardia_mfi_ct_byurbanicity_8panel.tiff` |
+| `0-config.R` | Shared libraries, helper functions (seroconversion/seroreversion rate calculator), color palettes | — |
+| `1-ecomid_table1.qmd` | Table 1: participant/household characteristics by community | `output/table_hhcharactersitics.xlsx` |
+| `2-ecomid_map_popdens.Qmd` | Two-panel study area map with population density | `figures/fig1_ecomid-map-population-density.tiff` |
+| `3-ecomid_process-pcr-data.Qmd` | Process raw GPP + TAC PCR data; harmonize pathogen names; restrict cohort to the 370 children with serology | `data/ecomid_pcr_analysis_data_2026-08-12.rds`, `.csv` |
+| `4-ecomid_pcr_prev.qmd` | PCR prevalence overall, by pathogen, and by community (cluster-robust SEs; 3-level community classification) | `output/ecomid_pcr_prev_by_pathogen.rds`, `output/ecomid_pcr_prev_by_community_3_levels.rds` |
+| `5-ecomid_seroincidence.qmd` | Seroprevalence and seroconversion rates with bootstrap CIs — overall, by pathogen, by community, by age group | `output/ecomid_sero_conv_tbl.rds`, `output/ecomid_sero_prev_rates_3_levels.rds`, `output/ecomid_pathogen_comm_sero_inc_3_levels.rds` |
+| `6-ecomid_seroreversion.qmd` | Seroreversion rates with bootstrap CIs — overall, by pathogen, by community, by age group | `output/ecomid_sero_rev_tbl.rds`, `output/ecomid_pathogen_comm_sero_rev_3_levels.rds` |
+| `7-ecomid_cumulative_incidence_data.qmd` | Point and cumulative (Kaplan-Meier) prevalence for PCR vs. IgG, by round and community | `output/ecomid_km_main_tidy.rds`, `output/ecomid_km_pcr_by_community_round.rds`, `output/ecomid_point_prevalence_pcr_vs_serology.csv` |
+| `8-ecomid_seropos_thresh_suppfig.qmd` | Supplemental figure: IgG MFI distributions and seropositivity threshold assignment | `figures/suppfig10_plot_igg_dists_stackedbar.tiff` |
+| `9-ecomid_serology_corr.qmd` | Pearson correlation heatmap of antigen MFI values | `figures/suppfig1_serology_antigen_corr_plot.tiff` |
+| `10-ecomid_dotplot_correlations.qmd` | Pathogen × community-type dot plots and Spearman correlations (SCR vs. PCR prevalence, seroprevalence, seroreversion) | `figures/fig4_dotplot_correlations_combined_3panel.tiff`, `output/dotplot_scr_vs_srr.rds` |
+| `11-ecomid_sero_pcr_comp_comm.qmd` | Serology vs. PCR comparison by community type; correlation summary table | `figures/suppfig8_scatterplot_spearman_community.tiff`, `output/supp_table_community_correlations.xlsx` |
+| `12-ecomid_sero_pcr_summary.qmd` | Supplemental sampling/prevalence tables and SCR/SRR rate figures by community and age group | `output/supp_table_1_sampling.xlsx`, `output/supp_table_3_prev_pathogen.xlsx`, `figures/suppfig7_scr_srr_communitytype.tiff`, `figures/suppfig5_scr_srr_agegroup_dotplot.tiff` |
+| `13-ecomid_age_based_visualization.qmd` | Age-based point vs. cumulative prevalence, PCR vs. IgG | `figures/fig2_prevalence_point_vs_cumulative.tiff` |
+| `14-ecomid_seroprev_by_age_urbanicity.qmd` | IgG seroprevalence by age and community type (3-level urbanicity) | `figures/fig3_age_based_igg_prevalence_byurbanicity.tiff` |
+| `15-ecomid_mfi_spaghetti_plots.qmd` | Longitudinal IgG trajectories by pathogen class; generates the PCR/IgG concordance classification | `output/ecomid_seropos_pcr_alltargets.rds`, `figures/suppfig2-4_aggregate_spaghetti_plot_*.tiff` |
+| `16-ecomid_rank_ordering.qmd` | Rank order of pathogen prevalence and seroconversion, overall and by community type | `output/supp_pathogen_prevalence_table_by_community_type.xlsx`, `figures/suppfig9_concordance_path_rank_scr_all.tiff` |
+| `17-ecomid_moa_calculation.qmd` | Log-binomial/modified Poisson PCR prevalence ratios; Poisson SCRR (measures of association) | `output/ecomid_scrr.rds`, `output/ecomid_pr.rds` |
+| `18-ecomid_moa_figure_creation.qmd` | Master composite figure: SCR, PCR prevalence, SCRR, PRR by pathogen class | `figures/fig5_moa_large_vertical.tiff` |
+| `19-ecomid_giardia_analysis_suppfig.qmd` | Giardia PCR+/IgG− discrepancy: TAC CT values and GPP MFI by IgG status and urbanicity | `figures/suppfig6_giardia_mfi_ct_byurbanicity_8panel.tiff` |
 
 ---
 
