@@ -1,0 +1,284 @@
+---
+title: "EcoMID PCR vs serology analysis"
+subtitle: "Process PCR data"
+author: "Ben Arnold ben.arnold@ucsf.edu; updated by Nikolina Walas nikolina.walas@ucsf.edu"
+date: "updated: `r Sys.time()`"
+format:
+  html:
+    
+    toc: true
+    embed-resources: true
+    code-fold: true
+    link-external-newwindow: true
+---
+File description: 
+
+This file generates a summary PCR dataset used in down stream analysis. 
+It was updated on August 12 to only include PCR data for the same cohort 
+of children as serology (370 children)
+
+
+# Preamble
+
+```{r preamble}
+library(here)
+here()
+#----------------------------
+# source the config file
+#----------------------------
+source(here("R","0-config.R"))
+```
+
+# Load the clean GPP-TAC longitudinal data
+
+```{r load gpp tac longitudinal data}
+
+#-------------------------------
+# read in the processed GPP and TAC data
+# These data were copied from
+# the ECoMiD sharepoint directory
+# on August 3, 2026 (data version 8/3/2026); they include TAC results only for salmonella
+# the most recent update corrects for childid typos for TAC results
+#-------------------------------
+
+d1 <-  read_csv(file = here("../../data/gpp-tac-longitudinal/","pcr_pathogens_tac_gpp_20260803.csv")) 
+length(unique(d1$house_ID)) 
+
+#-------------------------------
+# there are currently empty rows
+# for 21m measurement 
+# 
+# filter to ages with measurements
+#-------------------------------
+d2 <- d1 %>%
+  filter(visit %in% c("3m","6m","9m","12m","15m","18m","24m")) %>%
+  # format visit as factor and integer for convenience
+  mutate(visitf = factor(visit, levels=c("3m","6m","9m","12m","15m","18m","24m")),
+         visit = as.integer(gsub("m","",visit))
+         )
+length(unique(d2$house_ID))
+
+#-------------------------------
+# create child ID from
+# sampleid (first 6 characters)
+# identify community and community
+# type from sample ID
+#
+# NOTE: this is kind of a patch
+# because it only works for
+# children with samples
+# from the 519 children in the
+# cohort, there are 484 children
+# included in the dataset with
+# at least one sample (36 without)
+#-------------------------------
+d3 <- d2 %>%
+  mutate(childid = substr(sample_ID,1,6),
+    community = substr(childid,1,1),
+    community_name = case_when(
+      community=="E" ~ "Esmeraldas",
+      community=="B" ~ "Borbon",
+      community=="M" ~ "Maldonado",
+      community=="C" ~ "Colon de Onzole",
+      community=="S" ~ "Santo Domingo",
+      community=="T" ~ "Timbire",
+      community=="Z" ~ "Zancudo",
+      community=="A" ~ "Selva Alegre",
+      community=="L" ~ "Colon Eloy",
+      community=="F" ~ "San Francisco"
+    ),
+    community_type = case_when(
+      community_name == "Esmeraldas" ~ "Esmeraldas",
+      community_name == "Borbon" ~ "Borbon",
+      community_name %in% c("Maldonado", "Colon Eloy", "Timbire", "Selva Alegre") ~ "Rural Road",
+      community_name %in% c("Zancudo", "Colon de Onzole", "Santo Domingo", "San Francisco") ~ "Rural River"
+      ),
+    community_type = factor(community_type, levels = c("Esmeraldas","Borbon", "Rural Road","Rural River"))
+   ) %>%
+  # fill community info in within child
+  group_by(house_ID) %>%
+  fill(community, .direction = "downup") %>%
+  fill(community_name, .direction = "downup") %>%
+  fill(community_type, .direction = "downup") %>%
+  # identify taxa
+  mutate(taxa = case_when(
+    pathogen %in% c("Adenovirus_40_41","Norovirus_GI","Norovirus_GII","Rotavirus") ~ "Virus",
+    pathogen %in% c("Cryptosporidium","Entamoeba_histolytica","Giardia") ~ "Protozoan",
+    TRUE ~ as.character("Bacteria")
+  ),
+  taxa = factor(taxa, levels = c("Bacteria","Protozoan","Virus"))
+         )
+
+length(unique(d3$house_ID))
+
+#-------------------------------
+# filter to measurements
+# with samples collected and
+# results
+#
+# subset to relevant variables
+#-------------------------------
+d4 <- d3 %>%
+  filter(!is.na(sample_ID)) %>%
+  select(childid,house_ID,community,community_name,community_type,sample_ID,visitf,visit,pathogen,pcr_assay,pcrpos=presence) 
+
+print("Unique household ID's with samples collected and results")
+length(unique(d4$house_ID))
+
+print("Unique childID's with samples collected and results (should be same as above)")
+length(unique(d4$childid))
+
+
+print("Safety Check 1: childid and HHID count agreement")
+if (length(unique(d4$house_ID)) != length(unique(d4$childid))) {
+  print("FLAG: CHECK CHILDID AND HHID AGREEMENT")
+} else {
+  print("NO FLAG: CHILDID AND HHID ARE IN AGREEMENT")
+}
+
+print("Safety Check 2: sampleid and childid agreement")
+mismatches <- substr(d4$sample_ID, 1, 6) != substr(d4$childid, 1, 6)
+if (any(mismatches)) {
+  print("FLAG: SAMPLEID AND CHILDID DO NOT MATCH FOR SOME ROWS")
+} else {
+  print("NO FLAG: SAMPLEID AND CHILDID MATCH FOR ALL ROWS")
+}
+#-------------------------------
+# summarize the number of samples
+# by community and by visit
+#
+# and by community type and by visit
+#
+# (use Noro GII as an example)
+#-------------------------------
+cbind(table(d4$community_name[d4$pathogen=="Norovirus_GII"]))
+table(d4$community_name[d4$pathogen=="Norovirus_GII"],d4$visit[d4$pathogen=="Norovirus_GII"])
+
+cbind(table(d4$community_type[d4$pathogen=="Norovirus_GII"]))
+table(d4$community_type[d4$pathogen=="Norovirus_GII"],d4$visit[d4$pathogen=="Norovirus_GII"])
+
+#-------------------------------
+# summarize the assay used
+# at each age of measurement
+# GPP at ages 3,  9, 24
+# TAC at ages 6, 12, 18
+#-------------------------------
+table(d4$visitf[d4$pathogen=="Norovirus_GII"],d4$pcr_assay[d4$pathogen=="Norovirus_GII"])
+
+#-------------------------------
+# Add in pre-covid and post-covid data
+#-------------------------------
+# add in pre-COVID or post-COVID cohort indicator 
+a1 <- read.xlsx(here("../../Data/ecomid-field/untouched-2025-08-12/A1.xlsx"), detectDates = TRUE)
+a1$childid <- sprintf("%04d", a1$house_ID)
+
+recruited_pre_covid <- a1 %>% 
+  filter(!is.na(house_ID)) %>% 
+  filter(date_int <= "2020-03-22") %>%
+  dplyr::select(date_int, childid) 
+
+recruited_post_covid <- a1 %>%
+  filter(!is.na(house_ID)) %>%
+  filter(date_int > "2020-03-22") %>%
+  dplyr::select(date_int, house_ID)
+
+d5 <- d4 %>%
+  mutate(post_covid = ifelse(house_ID %in% recruited_post_covid$house_ID, 1, 0))
+
+print("number of pre-covid and post-covid children in the final pcr sample set")
+t1 <- d5 %>% ungroup() %>% select(childid, post_covid) %>% unique()
+table(factor(t1$post_covid, levels = c(0, 1), labels = c("pre_covid", "post_covid")))
+
+# check the pre-covid samples
+print("sample distribution of pre-covid children in the final pcr sample set")
+precovid <- d5 %>% ungroup %>% filter(post_covid == 0) 
+table(precovid$visitf[precovid$pathogen=="Norovirus_GII"],precovid$pcr_assay[precovid$pathogen=="Norovirus_GII"])
+
+print("sample distribution of post-covid children in the final pcr sample set")
+postcovid <- d5 %>% ungroup %>% filter(post_covid == 1) 
+table(postcovid$visitf[postcovid$pathogen=="Norovirus_GII"],postcovid$pcr_assay[postcovid$pathogen=="Norovirus_GII"])
+#-------------------------------
+# safety check (hhid with multiple childid)
+#-------------------------------
+
+houses_with_multiple_children <- d5 %>%
+  group_by(house_ID) %>%
+  filter(n_distinct(childid) >= 2) %>%
+  distinct(house_ID) %>%
+  pull(house_ID)
+
+houses_with_multiple_children
+```
+
+# Filter down to the Serology cohort (370 kids)
+
+```{r}
+# read in the serology datai don 
+sero_df <- read_csv(here("..","..",
+                      "Data","serology","final","ecomid_serology_datasets",
+                      "ecomid_sero_antigen_seropos_long_2026-08-24.csv")) %>% 
+  filter(antigen_lab != "Salmonella HylE") %>% 
+  select(childid, timepoint, community_name, community_type) %>% unique()
+
+# distribution of communities check 
+sero_df %>% distinct(childid, community_name, community_type) %>%
+  count(community_type) %>%
+  arrange(community_type)
+
+# distribution of ages check 
+sero_df %>% distinct(childid, timepoint) %>%
+  count(timepoint) %>%
+  arrange(timepoint)
+
+# number of children check 
+length(unique(sero_df$childid))
+
+# filter down to the serology children 
+d6 <- d5 %>% filter(childid %in% sero_df$childid) %>% ungroup()
+
+## CHECK FILTERED PCR DATAST ##
+print("Number of children")
+length(unique(d6$childid))
+
+print("Number of samples")
+length(unique(d6$sample_ID))
+
+print("Number of pre and post covid kids")
+t1 <- d6 %>% ungroup() %>% select(childid, post_covid) %>% unique()
+table(factor(t1$post_covid, levels = c(0, 1), labels = c("pre_covid", "post_covid")))
+
+# distribution of communities check 
+d6 %>% distinct(childid, community_name, community_type) %>%
+  count(community_type) %>%
+  arrange(community_type)
+
+# distribution of ages check 
+d6 %>% distinct(childid, visit) %>%
+  count(visit) %>%
+  arrange(visit)
+```
+
+# Save processed data
+
+```{r save data}
+#-------------------------------
+# save processed data
+#-------------------------------
+# change pathogen nomenclature to match serology 
+d7 <- d6 %>% mutate(pathogen = case_when(pathogen == "ETEC_LT" ~ "LT-ETEC", 
+                                              pathogen == "Entamoeba_histolytica" ~ "E. histolytica",
+                                              pathogen == "Salmonella_enterica" ~ "S. enterica", 
+                                              pathogen == "Norovirus_GI" ~ "Norovirus GI", 
+                                              pathogen == "Norovirus_GII" ~ "Norovirus GII",
+                                         pathogen == "Shigella" ~ "Shigella/EIEC",
+                                         TRUE ~ pathogen))
+                    
+write_rds(d7, file=here("data","ecomid_pcr_analysis_data_2026-08-12.rds"))
+write_csv(d7, file=here("data","ecomid_pcr_analysis_data_2026-08-12.csv"))
+```
+
+# Session Info
+
+```{r session info}
+sessionInfo()
+```

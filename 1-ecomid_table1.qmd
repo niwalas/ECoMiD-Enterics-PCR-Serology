@@ -1,0 +1,122 @@
+---
+title: "ecomid: pcr v serology, table1"
+author: "Nikolina Walas (nikolina.walas@ucsf.edu)"
+date: "updated: `r Sys.time()`"
+format:
+  html:
+    self-contained: true
+    toc: true
+    embed-resources: true
+    code-fold: true
+    link-external-newwindow: true
+execute: 
+  echo: true
+  warning: false
+  message: false
+---
+
+## Overview
+
+The purpose of this file is to generate a table 1 of participant characteristics for the trachoma elimination analysis.
+
+## Load packages
+
+```{r}
+library(here)
+source(here("R", "0-config.R"))
+```
+
+## Read in files
+
+```{r}
+# serology data by community type + pathogen
+s_data <- read_csv(here("..","..",
+                      "Data","serology","final","ecomid_serology_datasets",
+                      "ecomid_sero_antigen_seropos_long_2026-05-19.csv")) %>% 
+  filter(antigen_lab != "Salmonella HylE") # remove way upstream please
+s_data$house_ID <- str_sub(s_data$childid, -4)
+
+# participant information
+survey <- read.csv(here("../../Data/ecomid-field/final/surveydata_20251003.csv"))
+survey$house_ID <- str_pad(survey$house_ID, width = 4, pad = "0")
+
+survey_consolidated <- survey %>% filter(survey$house_ID %in% s_data$house_ID) %>% left_join(s_data %>% select(house_ID, community_type, community_name)) %>% unique()
+
+# safety check for missing data
+table(is.na(survey_consolidated$house_ID))
+missing <- data.frame(
+  n_missing = colSums(is.na(survey_consolidated)),
+  pct_missing = round(colMeans(is.na(survey_consolidated)) * 100, 1)
+)
+
+# add in sub-community variable (rural and rural-river)
+# RECODING FIX: Zancudo was originally mistakenly coded under rural road. qz
+survey_consolidated <- survey_consolidated %>% mutate(ct = case_when(
+  community_name == "Esmeraldas" ~ "Esmeraldas",
+      community_name == "Borbon" ~ "Borbon",
+      community_name %in% c("Maldonado", "Colon Eloy", "Timbire", "Selva Alegre") ~ "Rural Road",
+      community_name %in% c("Zancudo", "Colon de Onzole", "Santo Domingo", "San Francisco") ~ "Rural River"
+))
+
+# assign levels
+survey_consolidated$ct <- factor(survey_consolidated$ct,
+                    levels = c("Esmeraldas", "Borbon", "Rural Road", "Rural River"))
+
+# check distribution
+survey_consolidated %>% distinct(house_ID, community_name, ct) %>%
+  count(community_name, ct) %>%
+  arrange(community_name)
+
+survey_consolidated %>% distinct(house_ID, community_name, ct) %>%
+  count(ct) %>%
+  arrange(ct)
+```
+
+## Table 1 generation 
+
+```{r}
+# Recode flooring (cement and finished flooring together)
+survey_consolidated <- survey_consolidated %>% 
+  mutate(floors2 = ifelse(floors == "Cement" |
+                            floors == "Finished flooring", "Cement/finished", floors))
+
+# Recode water source (limited and unimproved together) and also add in if e. coli was detected in water (wat_detect yes or no)
+survey_consolidated <- survey_consolidated %>% 
+  mutate(water_jmp2 = ifelse(water_jmp == "unimproved" |
+                            water_jmp == "limited", "Limited/Unimproved", water_jmp), 
+         wat_detect2 = ifelse(wat_detect == 0, "not detected", "detected"))
+
+survey_consolidated$water_jmp2 <- factor(survey_consolidated$water_jmp2,
+                    levels = c("basic", "Limited/Unimproved", "surface water"))
+
+
+# Recode other variables 
+survey_consolidated <- survey_consolidated %>% 
+  mutate(mom_ethnicity2 = case_when(mom_ethnicity == 1 ~ "Afro-Ecuadorian", 
+                                    mom_ethnicity == 2 ~ "Chachi", 
+                                    mom_ethnicity == 3 ~ "Mestizo", 
+                                    mom_ethnicity == 4 ~ "Manabi",
+                                    TRUE ~ "other"))
+
+# Add appropriate levels 
+survey_consolidated$mom_ethnicity2 <- factor(survey_consolidated$mom_ethnicity2,
+                    levels = c("Afro-Ecuadorian", "Mestizo", "Manabi", "Chachi", "other"))
+
+# Mothers education- consolidate
+survey_consolidated <- survey_consolidated %>% 
+  mutate(mom_edu2 = case_when(momedu_cat == "Upper secondary" ~ "Secondary or less", 
+                                   momedu_cat == "Lower secondary" ~ "Secondary or less", 
+                                    momedu_cat == "Primary or less" ~ "Primary or less", 
+                                    momedu_cat == "Post-secondary or greater" ~ "Post-secondary or greater", 
+                                    TRUE ~ "missing"))
+survey_consolidated$mom_edu2 <- factor(survey_consolidated$mom_edu2,
+                    levels = c("Primary or less", "Secondary or less", "Post-secondary or greater", "missing"))
+
+# Make table 
+table1 <- table1(~ factor(sexo_nino) + momage + factor(mom_ethnicity2) +  mom_edu2 + birthorder + factor(hhwealthquart)  +
+                   factor(hhcrowd) + factor(toilet_type) + water_jmp2 + wat_detect2 + floors2  | ct, data=survey_consolidated)
+table1
+
+t1 <- as.data.frame(table1)
+t1 %>% write.xlsx(here("output/table_hhcharactersitics.xlsx"))
+```

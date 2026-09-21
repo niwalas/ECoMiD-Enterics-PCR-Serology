@@ -1,0 +1,660 @@
+---
+title: "sero_reversions_ecomid"
+date: "updated: `r Sys.time()`"
+format:
+  html:
+    self-contained: true
+    toc: true
+    embed-resources: true
+    code-fold: true
+    link-external-newwindow: true
+execute: 
+  echo: true
+  warning: false
+  message: false
+---
+
+## File overview
+
+This file calculates the seroreversion rate for all pathogens included in the pcr-serology enteric comparison study 
+
+### Load packages
+
+```{r}
+library(here)
+source(here("R", "0-config.R"))
+library(readxl)
+library(foreach)
+```
+
+### Read in files
+
+1.  Read in file, modified to most recent updated dataset with community attributes
+
+2.  Read in child-visit-level dataset for DOB + dbs/stool/svy visitdates
+
+```{r}
+data <- read_csv(here("..","..",
+                      "Data","serology","final","ecomid_serology_datasets",
+                      "ecomid_sero_antigen_seropos_long_2026-08-26.csv")) %>% 
+  filter(antigen_lab != "S. enterica HlyE") # remove way upstream please
+
+child_visit_data <- read_csv(here("..", "..", "Data", "ecomid-field", "final",
+                                  "ecomid_child_visit_info_2026-06-15.csv")) %>% 
+  mutate(community_name = ifelse(community_name == "Colon", "Colon de Onzole", community_name))
+
+# overview of unique childids in most recent file
+print("Unique childid's")
+unique(data$childid) %>% length()
+
+# overview of timepoints in most recent file
+print("timepoints")
+unique(data$timepoint)
+
+```
+
+## Seroreversion Table
+
+```{r}
+sero_rev_tbl <- data %>%
+  # Filter to enteric pathogens only & remove cholera & schistosoma (undefined threhold cut off; also remove HylE that is specific for paratyphi)
+  filter(group == "Enterics") %>%
+  filter(pathogen != "Cholera") %>%
+  filter(pathogen != "Schistosoma") %>%
+  filter(antigen_lab != "Salmonella HylE") %>%
+  
+  # filter to remove samples/targets that are NA for seropositivity (updated 10/13)
+  filter(!is.na(mfi))
+
+# safety check: what antigens are being included? 
+  unique(sero_rev_tbl$antigen_lab)
+
+  
+  # Step 1: Collapse from antigen level to pathogen level
+sero_rev_tbl <- sero_rev_tbl %>%  group_by(childid, timepoint, pathogen, pathogen_lab) %>%
+  summarise(
+    seropos = max(seropos, na.rm = TRUE),  # max across antigens
+    .groups = "drop"
+  ) %>%
+  
+  
+  # Step 2: Identify seroconversion 
+    # create atrisk, lead_seropos, lead_timepoint, & agediff attributes
+  arrange(childid, pathogen, timepoint) %>%
+  group_by(childid, pathogen, pathogen_lab) %>%
+  mutate(
+    atrisk = ifelse(seropos == 1, 1, 0), # only at risk if was seropositive and now losing it
+    lead_seropos = lead(seropos),
+    seroreversion = ifelse(atrisk == 1 & seropos == 1 & lead_seropos == 0, 1, 0)
+    )  %>%
+  ungroup() %>%
+  select(childid, pathogen, pathogen_lab, timepoint, seropos, atrisk,
+         lead_seropos, seroreversion) %>%
+  arrange(childid, pathogen, timepoint)
+
+#------------------------------------
+# join child_visit_data with sero_conv_tbl
+# identify missing dbs_visitdates
+#------------------------------------
+
+cv_attrs <- child_visit_data %>%
+  mutate(
+    timepoint       = as.numeric(timepoint),
+    dob             = as_date(dob),
+    visitdate_dbs   = as_date(visitdate_dbs),
+    visitdate_stool = as_date(visitdate_stool),
+    visitdate_svy   = as_date(visitdate_svy),
+    targetdate      = as_date(targetdate)
+  ) %>%
+  select(childid, timepoint, dob, visitdate_dbs, visitdate_stool, visitdate_svy, 
+         agedays_dbs, agedays_stool, agedays_svy, targetdate, community_name) %>%
+  distinct(childid, timepoint, .keep_all = TRUE) 
+
+joined <- sero_rev_tbl %>%
+  mutate(timepoint = as.numeric(timepoint)) %>%
+  left_join(cv_attrs, by = c("childid", "timepoint"))
+
+#------------------------------------
+# update sero_conv_tbl adding: lead_agedays, agedays_diff, person_time
+#------------------------------------
+sero_rev_tbl2 <- joined %>%
+  mutate(
+    # ensure Date types
+    dob            = as_date(dob),
+    visitdate_dbs  = as_date(visitdate_dbs),
+    visitdate_stool= as_date(visitdate_stool),
+    visitdate_svy  = as_date(visitdate_svy),
+    targetdate     = as_date(targetdate),
+    
+    #recomputing agedays_* safety check
+    agedays_dbs   = coalesce(agedays_dbs,
+                             if_else(!is.na(visitdate_dbs)  & !is.na(dob),
+                                     as.integer(visitdate_dbs  - dob), NA_integer_)),
+    agedays_stool = coalesce(agedays_stool,
+                             if_else(!is.na(visitdate_stool)& !is.na(dob),
+                                     as.integer(visitdate_stool- dob), NA_integer_)),
+    agedays_svy   = coalesce(agedays_svy,
+                             if_else(!is.na(visitdate_svy)  & !is.na(dob),
+                                     as.integer(visitdate_svy  - dob), NA_integer_)),
+    
+    # fallback from targetdate if no observed visit date
+    agedays_from_target = if_else(!is.na(targetdate) & !is.na(dob),
+                                  as.integer(targetdate - dob), NA_integer_),
+    
+    # best-available age in days for this visit (dbs > stool > svy > target)
+    agedays_best = coalesce(agedays_dbs, agedays_stool, agedays_svy, agedays_from_target)
+  ) %>%
+  arrange(childid, pathogen, agedays_best, timepoint) %>%   # order chronologically
+  group_by(childid, pathogen, pathogen_lab) %>%
+  mutate(
+    lead_agedays_best = lead(agedays_best),
+    age_diff_days     = lead_agedays_best - agedays_best,
+    person_time_days = case_when(
+      atrisk == 0 ~ 0,
+      atrisk == 1 & seroreversion == 0 ~ age_diff_days,
+      atrisk == 1 & seroreversion == 1 ~ age_diff_days / 2
+    ),
+    person_time_years  = person_time_days / 365.25
+  ) %>%
+  ungroup() %>%
+  select(
+    childid, dob, 
+    visitdate_dbs, visitdate_stool, visitdate_svy, 
+    pathogen, pathogen_lab, timepoint,targetdate, 
+    seropos, atrisk, lead_seropos, seroreversion, 
+    agedays_dbs, agedays_stool, agedays_svy, agedays_from_target,
+    agedays_best, lead_agedays_best, age_diff_days,
+    person_time_days, person_time_years, community_name
+  ) %>%
+  arrange(childid, pathogen, timepoint) %>% 
+  mutate(community_type = case_when(community_name == "Esmeraldas" ~ "Esmeraldas", 
+                                    community_name == "Borbon" ~ "Borbon", 
+                                    TRUE ~ "Rural"))
+
+sero_rev_tbl2$community_type <- factor(sero_rev_tbl2$community_type, levels = c("Esmeraldas", "Borbon", "Rural"))
+```
+
+## Distribution of seroreversion events per pathogen, by child
+
+```{r}
+sero_count <- sero_rev_tbl2 %>%
+  group_by(pathogen, childid) %>%
+  summarise(
+    n_rev = sum(seroreversion, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  count(pathogen, n_rev) %>% rename(n_children = n) %>% 
+  mutate(n_rev = paste0(n_rev, "_reversions")) %>% 
+  pivot_wider(
+    names_from = n_rev,
+    values_from = n_children,
+    values_fill = 0
+  )
+```
+
+## Bootstrap: seroreversion per pathogen
+
+```{r}
+# seroreversion per pathogen
+# Build child × pathogen summary
+#------------------------------------
+child_pathogen <- sero_rev_tbl2 %>%
+  group_by(pathogen, childid) %>%
+  summarise(
+    events = sum(seroreversion, na.rm = TRUE),   # cap at 1 if you want first-ever
+    py     = sum(person_time_years, na.rm = TRUE),          # person-time in YEARS
+    .groups = "drop"
+  )                                   # only contributors
+
+#------------------------------------
+# helper function: calc incidence rate
+#------------------------------------
+est_ir <- function(serorev, pt) {
+  nsc  <- sum(serorev, na.rm = TRUE)
+  ptar <- sum(pt,        na.rm = TRUE)
+  if (ptar <= 0) return(NA_real_)
+  nsc / ptar
+  }
+
+#------------------------------------
+# set up bootstrap resample childid and calc IR overall pathogens
+#------------------------------------
+set.seed(19373)
+nboot <- 1000
+
+pathogens <- sort(unique(child_pathogen$pathogen))
+boot_results <- vector("list", length(pathogens))
+
+for (k in seq_along(pathogens)) {
+  p  <- pathogens[k]
+  df <- child_pathogen %>% filter(pathogen == p)
+  
+  # 1) Observed SRR for this pathogen 
+  ir_obs <- est_ir(df$events, df$py)
+  
+  # 2) resampling matrix of child IDs (clusters) for pathogen k
+  idlist    <- unique(df$childid)
+  n_ids     <- length(idlist)
+  boot_samp <- matrix(
+    sample(idlist, size = n_ids * nboot, replace = TRUE),
+    nrow = n_ids, ncol = nboot
+    )
+  # 3) Bootstrap loop: rebuild dataset per replicate via left_join 
+  ir_boots <- foreach(i = 1:nboot, .combine = c) %do% {
+    di <- left_join(
+      tibble(childid = boot_samp[, i]),
+      df, by = "childid",                 # duplicates keep whole child trajectory
+      relationship = "many-to-many"
+      )
+    iri <- est_ir(di$events, di$py)
+    return(iri)
+  }
+  
+  boot_results[[k]] <- tibble(
+    pathogen = p,
+    ir_obs = ir_obs,
+    ir_lo  = quantile(ir_boots, 0.025, na.rm = TRUE),
+    ir_hi  = quantile(ir_boots, 0.975, na.rm = TRUE),
+    ir_obs_per_100 = 100 * ir_obs,
+    ir_lo_per_100  = 100 * ir_lo,
+    ir_hi_per_100  = 100 * ir_hi
+  )
+}
+
+#examine distribution
+hist(ir_boots, breaks = 40)
+
+boot_summary <- bind_rows(boot_results)
+
+```
+## Bootstrap: seroconversion per pathogen by community
+
+```{r}
+child_comm <- data %>%
+  select(childid, community_name, community_type) %>% 
+  rename(community_type2 = community_type) %>% 
+  distinct()
+
+child_pathogen_comm <- sero_rev_tbl2 %>%
+  left_join(child_comm %>% select(-community_name), by = "childid") %>%
+  group_by(pathogen, community_name, community_type, childid) %>%
+  summarise(
+    # events per child (cap at 1 if you only want first-ever seroconversion)
+    events = sum(seroreversion, na.rm = TRUE),
+    # person-time in YEARS
+    py     = sum(person_time_years, na.rm = TRUE),
+    .groups = "drop_last"
+  )
+   
+
+# 3) Bootstrap (child-cluster) within each pathogen × community
+set.seed(39485)
+nboot <- 1000
+keys <- child_pathogen_comm %>%
+  distinct(pathogen, community_name, community_type) %>%
+  arrange(pathogen, community_name, community_type)
+boot_results_pc <- vector("list", nrow(keys))
+
+
+for (i in seq_len(nrow(keys))) {
+  p  <- keys$pathogen[i]
+  cm <- keys$community_name[i]
+  df <- child_pathogen_comm %>% filter(pathogen == p, community_name == cm)
+  
+  n_children <- n_distinct(df$childid)
+  total_events <- sum(df$events, na.rm = TRUE)
+  total_py     <- sum(df$py,     na.rm = TRUE)
+  
+  # Observed IR for this stratum
+  ir_obs <- est_ir(df$events, df$py)
+  
+  # skip stratum if not enough available info
+  if (n_children == 0 || is.na(ir_obs) || total_py <= 0) {
+    boot_results_pc[[i]] <- tibble(
+      pathogen = p, community_name = cm,
+      n_children, total_events, total_py,
+      ir = ir_obs, ir_per_100 = 100 * ir_obs,
+      ir_lo = NA_real_, ir_hi = NA_real_,
+      ir_lo_per_100 = NA_real_, ir_hi_per_100 = NA_real_
+    )
+    next  
+  }
+  
+  # Matrix of resampled child IDs (clusters)
+  idlist <- unique(df$childid)
+  n_ids  <- length(idlist)
+  boot_samp <- matrix(
+    sample(idlist, size = n_ids * nboot, replace = TRUE),
+    nrow = n_ids, ncol = nboot
+  )
+  
+  ir_boots <- foreach(b = 1:nboot, .combine = c) %do% {
+    di <- left_join(
+      tibble(childid = boot_samp[, b]),
+      df, by = "childid" 
+    )
+    est_ir(di$events, di$py)
+  }
+  
+  # Precompute quantiles, then per-100
+  lo <- as.numeric(quantile(ir_boots, 0.025, na.rm = TRUE))
+  hi <- as.numeric(quantile(ir_boots, 0.975, na.rm = TRUE))
+
+
+  boot_results_pc[[i]] <- tibble(
+    pathogen = p, community_name = cm,
+    n_children, total_events, total_py,
+    ir = ir_obs, ir_per_100 = 100 * ir_obs,
+    ir_lo = lo, ir_hi = hi,
+    ir_lo_per_100 = 100 * lo,
+    ir_hi_per_100 = 100 * hi
+  )
+}
+
+
+#examine distribution
+hist(ir_boots, breaks = 30)
+
+boot_summary_pc <- bind_rows(boot_results_pc) %>%
+  arrange(pathogen, community_name) %>% 
+  left_join(data %>% # manually add back in community_type labels
+              select(pathogen, community_name, 
+                     community_type), 
+            by = c("pathogen", "community_name")) %>% unique()
+
+```
+
+## Seroreversion rate calculation
+
+Daily and annually
+
+```{r}
+sero_rev_rates <- sero_rev_tbl2 %>%
+  group_by(pathogen) %>%
+  summarise(
+    total_seroreversions = sum(seroreversion, na.rm = TRUE),
+    total_person_time_days = sum(person_time_days, na.rm = TRUE),  # includes person-time for those not at risk? 
+    total_person_time_years = sum(person_time_years, na.rm = TRUE),
+    
+    reversion_rate_per_day = total_seroreversions / total_person_time_days,
+    reversion_rate_per_year = total_seroreversions / total_person_time_years,
+    
+    rev_per_100_child_years = 100 * reversion_rate_per_year
+    
+  ) %>%
+  ungroup()
+
+# check how many seroreversions there are (at least one)
+result <- sero_rev_tbl2 %>% 
+  arrange(childid, pathogen, timepoint) %>%
+  group_by(childid, pathogen) %>%
+  summarise(
+    pattern = paste(seroreversion, collapse = "")
+  ) %>%
+  filter(grepl("1", pattern)) %>%   # 1, then one or more 0s, then 1
+  #select(childid, pathogen) %>%
+  unique() %>% as.data.frame() %>% rename(childid = 1)
+
+print("Number of seroreversions (childid-pathogen level)")
+length(unique(result$childid))
+
+print("Number of unique children with a seroreversion for at least 1 pathogen")
+result %>% select(childid) %>% unique() %>% nrow()
+
+# check how many seroreversions there are (at least one)
+result2 <- sero_rev_tbl2 %>% 
+  arrange(childid, pathogen, timepoint) %>%
+  group_by(childid, pathogen) %>%
+  summarise(
+    pattern = paste(seroreversion, collapse = "")
+  ) %>%
+  filter(grepl("10+1", pattern)) %>%   # 1, then one or more 0s, then 1
+  #select(childid, pathogen) %>%
+  unique() %>% as.data.frame() %>% rename(childid = 1)
+
+print("Top pathogens for multiple seroreversions")
+result2 %>% select(pathogen) %>% 
+  group_by(pathogen) %>% 
+  summarise(n_children = n()) %>% 
+  arrange(desc(n_children))
+
+sero_rev_by_path <- sero_rev_rates %>%
+  left_join(boot_summary, by = "pathogen") %>%
+  select(pathogen, total_seroreversions, total_person_time_years, ir_obs_per_year = ir_obs, ir_lo_per_year = ir_lo, ir_hi_per_year = ir_hi, ir_obs_per_100, ir_lo_per_100, ir_hi_per_100)
+```
+
+## Seroreversion table, community level
+
+```{r}
+#------------------------------------
+# export seroreversion table, 
+# seroincidence rates CI csv & rds
+#------------------------------------
+
+sys.date <- format(Sys.Date(), "%Y%m%d")
+
+saveRDS(sero_rev_tbl2, file = here("output/ecomid_sero_rev_tbl.rds"))
+write.csv(sero_rev_tbl2, file = here("output/ecomid_sero_rev_tbl.csv"))
+
+
+write.csv(sero_rev_by_path, file = here("output/ecomid_pathogen_sero_rev.csv"))
+saveRDS(sero_rev_by_path, file = here("output/ecomid_pathogen_sero_rev.rds"))
+
+
+write.csv(boot_summary_pc, file = here("output/ecomid_pathogen_comm_sero_rev.csv"))
+saveRDS(boot_summary_pc, file = here("output/ecomid_pathogen_comm_sero_rev.rds"))
+
+```
+
+## Community levels (Esmeraldas, Borbon, Rural)
+
+
+For ease of analysis in downstream, repeat the serocreversion, prevalence and bootstrapping for different grouping levels.
+
+### Recode community leves
+
+```{r}
+# create higher level community variable 
+data2 <- data %>% mutate(community_type2 = case_when(
+      community_name == "Esmeraldas" ~ "Esmeraldas",
+      community_name == "Borbon" ~ "Borbon",
+      community_name %in% c("Maldonado", "Timbire", "Selva Alegre", "Colon Eloy",
+                            "Zancudo", "Santo Domingo", "Colon de Onzole", "San Francisco") ~ "Rural"))
+```
+
+### Bootstrap sero-reversion per pathogen & community levels
+
+Repeat steps as before but with new aggregated level
+
+```{r}
+child_comm2 <- data2 %>%
+  select(childid, community_type2) %>%
+  distinct()
+
+child_pathogen_comm2 <- sero_rev_tbl2 %>%
+  left_join(child_comm2, by = "childid") %>%
+  group_by(pathogen, community_type2, childid) %>%
+  summarise(
+    # events per child (cap at 1 if you only want first-ever seroreversion)
+    events = sum(seroreversion, na.rm = TRUE),
+    # person-time in YEARS
+    py     = sum(person_time_years, na.rm = TRUE),
+    .groups = "drop_last"
+  )
+   
+
+# 3) Bootstrap (child-cluster) within each pathogen × community
+set.seed(234897)
+nboot <- 1000
+keys <- child_pathogen_comm2 %>%
+  distinct(pathogen, community_type2) %>%
+  arrange(pathogen, community_type2)
+
+boot_results_pc <- vector("list", nrow(keys))
+
+for (i in seq_len(nrow(keys))) {
+  p  <- keys$pathogen[i]
+  cm <- keys$community_type2[i]
+  df <- child_pathogen_comm2 %>% filter(pathogen == p, community_type2 == cm)
+  
+  n_children <- n_distinct(df$childid)
+  total_events <- sum(df$events, na.rm = TRUE)
+  total_py     <- sum(df$py,     na.rm = TRUE)
+  
+  # Observed IR for this stratum
+  ir_obs <- est_ir(df$events, df$py)
+  
+  # skip stratum if not enough available info
+  if (n_children == 0 || is.na(ir_obs) || total_py <= 0) {
+    boot_results_pc[[i]] <- tibble(
+      pathogen = p, community_type2 = cm,
+      n_children, total_events, total_py,
+      ir = ir_obs, ir_per_100 = 100 * ir_obs,
+      ir_lo = NA_real_, ir_hi = NA_real_,
+      ir_lo_per_100 = NA_real_, ir_hi_per_100 = NA_real_
+    )
+    next  
+  }
+  
+  # Matrix of resampled child IDs (clusters)
+  idlist <- unique(df$childid)
+  n_ids  <- length(idlist)
+  boot_samp <- matrix(
+    sample(idlist, size = n_ids * nboot, replace = TRUE),
+    nrow = n_ids, ncol = nboot
+  )
+  
+  ir_boots <- foreach(b = 1:nboot, .combine = c) %do% {
+    di <- left_join(
+      tibble(childid = boot_samp[, b]),
+      df, by = "childid" 
+    )
+    est_ir(di$events, di$py)
+  }
+  
+  # Precompute quantiles, then per-100
+  lo <- as.numeric(quantile(ir_boots, 0.025, na.rm = TRUE))
+  hi <- as.numeric(quantile(ir_boots, 0.975, na.rm = TRUE))
+
+
+  boot_results_pc[[i]] <- tibble(
+    pathogen = p, community_type2 = cm,
+    n_children, total_events, total_py,
+    ir = ir_obs, ir_per_100 = 100 * ir_obs,
+    ir_lo = lo, ir_hi = hi,
+    ir_lo_per_100 = 100 * lo,
+    ir_hi_per_100 = 100 * hi
+  )
+}
+
+
+# examine distribution
+hist(ir_boots, breaks = 30)
+
+boot_summary_pc <- bind_rows(boot_results_pc) %>%
+  arrange(pathogen, community_type2)
+
+# export 
+write.csv(boot_summary_pc, file = here("output/ecomid_pathogen_comm_sero_rev_3_levels.csv"))
+saveRDS(boot_summary_pc, file = here("output/ecomid_pathogen_comm_sero_rev_3_levels.rds"))
+```
+
+## Age-based seroreversion (under 12 months, over 12 months)
+```{r}
+child_agegroup <- data2 %>%
+  select(childid, community_type2, timepoint) %>%
+  distinct() %>% 
+  mutate(age_group = ifelse(timepoint < 12, "6-9 months", "12-24 months"))
+
+child_pathogen_age <- sero_rev_tbl2 %>%
+  left_join(child_agegroup, by = c("childid", "timepoint")) %>%
+  group_by(pathogen, age_group, childid) %>%
+  summarise(
+    # events per child (cap at 1 if you only want first-ever seroreversion)
+    events = sum(seroreversion, na.rm = TRUE),
+    # person-time in YEARS
+    py     = sum(person_time_years, na.rm = TRUE),
+    .groups = "drop_last"
+  )
+   
+
+# 3) Bootstrap (child-cluster) within each pathogen × community
+set.seed(234897)
+nboot <- 1000
+keys <- child_pathogen_age %>%
+  distinct(pathogen, age_group) %>%
+  arrange(pathogen, age_group)
+
+boot_results_pc <- vector("list", nrow(keys))
+
+for (i in seq_len(nrow(keys))) {
+  p  <- keys$pathogen[i]
+  ag <- keys$age_group[i]
+  df <- child_pathogen_age %>% filter(pathogen == p, age_group == ag)
+  
+  n_children <- n_distinct(df$childid)
+  total_events <- sum(df$events, na.rm = TRUE)
+  total_py     <- sum(df$py,     na.rm = TRUE)
+  
+  # Observed IR for this stratum
+  ir_obs <- est_ir(df$events, df$py)
+  
+  # skip stratum if not enough available info
+  if (n_children == 0 || is.na(ir_obs) || total_py <= 0) {
+    boot_results_pc[[i]] <- tibble(
+      pathogen = p, age_group = ag,
+      n_children, total_events, total_py,
+      ir = ir_obs, ir_per_100 = 100 * ir_obs,
+      ir_lo = NA_real_, ir_hi = NA_real_,
+      ir_lo_per_100 = NA_real_, ir_hi_per_100 = NA_real_
+    )
+    next  
+  }
+  
+  # Matrix of resampled child IDs (clusters)
+  idlist <- unique(df$childid)
+  n_ids  <- length(idlist)
+  boot_samp <- matrix(
+    sample(idlist, size = n_ids * nboot, replace = TRUE),
+    nrow = n_ids, ncol = nboot
+  )
+  
+  ir_boots <- foreach(b = 1:nboot, .combine = c) %do% {
+    di <- left_join(
+      tibble(childid = boot_samp[, b]),
+      df, by = "childid" 
+    )
+    est_ir(di$events, di$py)
+  }
+  
+  # Precompute quantiles, then per-100
+  lo <- as.numeric(quantile(ir_boots, 0.025, na.rm = TRUE))
+  hi <- as.numeric(quantile(ir_boots, 0.975, na.rm = TRUE))
+
+
+  boot_results_pc[[i]] <- tibble(
+    pathogen = p, age_group = ag,
+    n_children, total_events, total_py,
+    ir = ir_obs, ir_per_100 = 100 * ir_obs,
+    ir_lo = lo, ir_hi = hi,
+    ir_lo_per_100 = 100 * lo,
+    ir_hi_per_100 = 100 * hi
+  )
+}
+
+
+# examine distribution
+hist(ir_boots, breaks = 30)
+
+boot_summary_pc <- bind_rows(boot_results_pc) %>%
+  arrange(pathogen, age_group)
+
+# export 
+write.csv(boot_summary_pc, file = here("output/ecomid_pathogen_agegroup_sero_rev.csv"))
+saveRDS(boot_summary_pc, file = here("output/ecomid_pathogen_agegroup_sero_rev.rds"))
+
+```
+
+
+
+
