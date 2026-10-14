@@ -1,0 +1,862 @@
+---
+title: "EcoMiD: rank order of pathogen prevalence"
+date: today
+date-modified: "2026-10-07"
+format:
+  html:
+    self-contained: true
+    toc: true
+    embed-resources: true
+    code-fold: true
+    link-external-newwindow: true
+execute: 
+  echo: true
+  warning: false
+  message: false
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+## File overview
+
+The purpose of this file is to further investigate the rank ordering of
+pathogen prevalence for the EcoMiD cohort, both by IgG and PCR.
+
+|     |
+|-----|
+
+## System setup
+
+```{r}
+# Read in files 
+library(here)
+source(here("R", "0-config.R"))
+```
+
+## Read in files
+
+```{r}
+# seropositivity individual level
+# seroconversion by community type + pathogen
+sero_inc_type <- readRDS(here("output/ecomid_pathogen_comm_sero_inc_3_levels.rds"))  %>% 
+  filter(pathogen != "Strongyloides" & pathogen != "T. solium")
+sero_inc_type$community_type2 <- factor(sero_inc_type$community_type2, levels = c("Esmeraldas", "Borbon", "Rural"))
+
+# seroprevalence by community type + pathogen
+sero_prev_type <- readRDS(here("output/ecomid_sero_prev_rates_3_levels.rds"))
+sero_prev_type$community_type2 <- factor(sero_prev_type$community_type2, levels = c("Esmeraldas", "Borbon", "Rural"))
+
+# pcr prevalence by community type + pathogen
+pcr_prev_type <- readRDS(here("output/ecomid_pcr_prev_by_community_3_levels.rds"))
+pcr_prev_type$community_type2 <- factor(pcr_prev_type$community_type2, levels = c("Esmeraldas", "Borbon", "Rural"))
+
+# seroreversion rate by community type + pathogen 
+sero_rev_type <- readRDS(here("output/ecomid_pathogen_comm_sero_rev_3_levels.rds")) %>% 
+  filter(pathogen != "Strongyloides" & pathogen != "T. solium")
+sero_rev_type$community_type2 <- factor(sero_rev_type$community_type2, levels = c("Esmeraldas", "Borbon", "Rural"))
+
+# overall measures (by pathogen)
+sero_prev_path <- readRDS(here("output/ecomid_sero_prev_rates.rds")) %>% 
+  filter(community_name == "All communities")
+
+pcr_prev_path <- readRDS(here("output/ecomid_pcr_prev_by_pathogen.rds"))
+
+# seroincidence 
+
+sero_inc_path <- readRDS(here("output/ecomid_pathogen_sero_inc.rds")) %>% 
+  filter(pathogen != "Strongyloides" & pathogen != "T. solium")
+
+```
+
+## Assay rank ordering
+
+### 1a) Overall pathogen prevalence
+
+```{r}
+## ---------------------------------------------------------------
+## Rank order of pathogen prevalence: IgG vs. PCR (slope/bump chart)
+## Inputs: pcr_prev_path (pathogen, prevalence, lower_ci, upper_ci)
+##         sero_prev_path (pathogen, sero_prevalence, lower_ci, upper_ci)
+## (sero_prev_path is labeled "IgG" throughout figures/tables)
+## ---------------------------------------------------------------
+
+## 1. Keep only pathogens present in BOTH dataframes, then rank within
+##    each assay (rank 1 = highest prevalence) ----
+shared_pathogens <- intersect(pcr_prev_path$pathogen, sero_prev_path$pathogen)
+
+pcr_rank <- pcr_prev_path %>%
+  filter(pathogen %in% shared_pathogens) %>%
+  transmute(pathogen, assay = "PCR", prevalence, lower_ci, upper_ci) %>%
+  mutate(rank = rank(-prevalence, ties.method = "min"))
+
+sero_rank <- sero_prev_path %>%
+  filter(pathogen %in% shared_pathogens) %>%
+  transmute(pathogen, assay = "IgG",
+            prevalence = sero_prevalence, lower_ci, upper_ci) %>%
+  mutate(rank = rank(-prevalence, ties.method = "min"))
+
+rank_df <- bind_rows(pcr_rank, sero_rank) %>%
+  mutate(assay = factor(assay, levels = c("IgG", "PCR")))
+
+## 2. Slope/bump chart ---------------------------------------------------
+n_pathogens <- n_distinct(rank_df$pathogen)
+
+p <- ggplot(rank_df, aes(x = assay, y = rank, group = pathogen)) +
+  geom_line(aes(color = pathogen), linewidth = 0.9, show.legend = FALSE) +
+  geom_point(aes(color = pathogen), size = 3, show.legend = FALSE) +
+  geom_text(
+    data = filter(rank_df, assay == "IgG"),
+    aes(label = pathogen), x = 0.85, hjust = 1, size = 3.3
+  ) +
+  geom_text(
+    data = filter(rank_df, assay == "PCR"),
+    aes(label = pathogen), x = 2.15, hjust = 0, size = 3.3
+  ) +
+  scale_y_reverse(breaks = seq_len(n_pathogens)) +
+  scale_x_discrete(expand = expansion(add = c(0.9, 0.9))) +
+  labs(
+    x = NULL, y = "Rank (1 = highest prevalence)",
+    title = "Rank order of pathogen prevalence: IgG vs. PCR"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(face = "bold", size = 12),
+    plot.title = element_text(hjust = 0.5)
+  )
+
+## Swap in your lab theme here, e.g.:
+## p <- p + your_lab_theme() + scale_color_manual(values = your_palette)
+
+print(p)
+
+## Optional: save
+## ggsave("pathogen_rank_slopechart.png", p, width = 7, height = 0.4 * n_pathogens + 2, dpi = 300)
+
+## ---------------------------------------------------------------
+## 3. Companion dumbbell plot with 95% CIs, ordered by mean rank
+##    (useful if you also want to show precision, not just order)
+## ---------------------------------------------------------------
+
+order_df <- rank_df %>%
+  group_by(pathogen) %>%
+  summarize(mean_rank = mean(rank), .groups = "drop") %>%
+  arrange(mean_rank)
+
+rank_df2 <- rank_df %>%
+  mutate(pathogen = factor(pathogen, levels = rev(order_df$pathogen)))
+
+p2 <- ggplot(rank_df2, aes(x = prevalence, y = pathogen, color = assay)) +
+geom_line(aes(group = pathogen), color = "grey70", linewidth = 0.6) +
+geom_errorbarh(aes(xmin = lower_ci, xmax = upper_ci),
+height = 0.15, position = position_dodge(width = 0.4)) +
+geom_point(size = 3, position = position_dodge(width = 0.4)) +
+scale_color_manual(values = c(PCR = "#009E73", IgG = "#CC79A7")) +
+labs(
+x = "Prevalence", y = NULL, color = "Assay",
+title = "Pathogen prevalence by assay (ranked, with 95% CI)"
+) +
+theme_minimal(base_size = 12) +
+theme(panel.grid.minor = element_blank())
+
+print(p2)
+
+## ---------------------------------------------------------------
+## 4. Wide-format data (one row per pathogen) used by the scatter
+##    plot and table below
+## ---------------------------------------------------------------
+
+wide_rank <- sero_rank %>%
+  select(pathogen, igg_prevalence = prevalence, igg_lower = lower_ci,
+         igg_upper = upper_ci, igg_rank = rank) %>%
+  inner_join(
+    pcr_rank %>%
+      select(pathogen, pcr_prevalence = prevalence, pcr_lower = lower_ci,
+             pcr_upper = upper_ci, pcr_rank = rank),
+    by = "pathogen"
+  ) %>%
+  mutate(rank_diff = igg_rank - pcr_rank) %>%
+  arrange(igg_rank)
+
+## ---------------------------------------------------------------
+## 5. Rank-rank scatter plot (concordance between assays)
+##    Points on the dashed diagonal = same rank in both assays;
+##    the further off the diagonal, the more the assays disagree.
+## ---------------------------------------------------------------
+
+# install.packages("ggrepel") if not already installed
+library(ggrepel)
+
+p3 <- ggplot(wide_rank, aes(x = igg_rank, y = pcr_rank)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey60") +
+  geom_point(size = 3, color = "steelblue") +
+  geom_text_repel(aes(label = pathogen), size = 3.3, max.overlaps = Inf) +
+  scale_x_continuous(breaks = seq_len(n_pathogens)) +
+  scale_y_continuous(breaks = seq_len(n_pathogens)) +
+  coord_equal() +
+  labs(
+    x = "IgG rank", y = "PCR rank") + 
+    #title = "Concordance of pathogen rank between IgG and PCR"
+  #) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+
+print(p3)
+#ggsave(here("figures/suppfig9_concordance_path_rank_all.png"), p3, height = 7, width = 7)
+
+## ---------------------------------------------------------------
+## 6. Summary table (pathogen, prevalence + 95% CI, and rank, by assay)
+##    A table is a good complement here: the charts show pattern/order
+##    at a glance, but a table gives exact numbers reviewers/collaborators
+##    may want (and is easy to drop into a manuscript supplement).
+## ---------------------------------------------------------------
+
+# install.packages("gt") if not already installed
+library(gt)
+
+# NOTE: assumes prevalence/CI columns are proportions (0-1); if they are
+# already percentages, drop the "* 100" below.
+table_df <- wide_rank %>%
+  mutate(
+    IgG = sprintf("%.1f%% (%.1f–%.1f%%)", igg_prevalence * 100, igg_lower * 100, igg_upper * 100),
+    PCR = sprintf("%.1f%% (%.1f–%.1f%%)", pcr_prevalence * 100, pcr_lower * 100, pcr_upper * 100)
+  ) %>%
+  select(pathogen, IgG, igg_rank, PCR, pcr_rank, rank_diff)
+
+gt_tbl <- table_df %>%
+  gt() %>%
+  tab_header(title = "Pathogen prevalence and rank order by assay") %>%
+  cols_label(
+    pathogen = "Pathogen",
+    IgG = "IgG prevalence (95% CI)",
+    igg_rank = "IgG rank",
+    PCR = "PCR prevalence (95% CI)",
+    pcr_rank = "PCR rank",
+    rank_diff = "Rank Δ (IgG − PCR)"
+  ) %>%
+  cols_align(align = "center", columns = c(igg_rank, pcr_rank, rank_diff)) %>%
+  opt_row_striping()
+
+gt_tbl
+
+## Optional: save table as image/html
+## gtsave(gt_tbl, "pathogen_prevalence_table.png")
+
+
+```
+
+### 1b) Prevalence by community type
+
+```{r}
+
+## 1. Keep only pathogen x community_type2 combinations present in BOTH
+##    dataframes, then rank within each assay x community_type2 group
+##    (rank 1 = highest prevalence) ----
+
+common_combos <- inner_join(
+  pcr_prev_type %>% distinct(pathogen, community_type2),
+  sero_prev_type %>% distinct(pathogen, community_type2),
+  by = c("pathogen", "community_type2")
+)
+
+## Relabel community_type2 values for display
+
+pcr_rank <- pcr_prev_type %>%
+  semi_join(common_combos, by = c("pathogen", "community_type2")) %>%
+  transmute(pathogen, community_type2,
+            assay = "PCR", prevalence = pcr_prevalence, lower_ci, upper_ci) %>%
+  group_by(community_type2) %>%
+  mutate(rank = rank(-prevalence, ties.method = "min")) %>%
+  ungroup()
+
+sero_rank <- sero_prev_type %>%
+  semi_join(common_combos, by = c("pathogen", "community_type2")) %>%
+  transmute(pathogen, community_type2,
+            assay = "IgG", prevalence = sero_prevalence, lower_ci, upper_ci) %>%
+  group_by(community_type2) %>%
+  mutate(rank = rank(-prevalence, ties.method = "min")) %>%
+  ungroup()
+
+rank_df <- bind_rows(sero_rank, pcr_rank) %>%
+  mutate(assay = factor(assay, levels = c("IgG", "PCR")))
+
+## ---------------------------------------------------------------
+## 2. Faceted slope/bump chart: IgG vs. PCR rank, one panel per
+##    community type (comparison A)
+## ---------------------------------------------------------------
+
+p1 <- ggplot(rank_df, aes(x = assay, y = rank, group = pathogen)) +
+  geom_line(aes(color = pathogen), linewidth = 0.8, show.legend = FALSE) +
+  geom_point(aes(color = pathogen), size = 2.5, show.legend = FALSE) +
+  geom_text(
+    data = filter(rank_df, assay == "IgG"),
+    aes(label = pathogen), x = 0.8, hjust = 1, size = 2.8
+  ) +
+  geom_text(
+    data = filter(rank_df, assay == "PCR"),
+    aes(label = pathogen), x = 2.2, hjust = 0, size = 2.8
+  ) +
+  facet_wrap(~community_type2, scales = "free_y", ncol = 1) +
+  scale_y_reverse(breaks = breaks_width(1)) +
+  scale_x_discrete(expand = expansion(add = c(1.1, 1.1))) +
+  labs(
+    x = NULL, y = "Rank (1 = highest prevalence)",
+    title = "Rank order of pathogen prevalence, IgG vs. PCR, by community type"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(face = "bold"),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(hjust = 0.5)
+  )
+
+print(p1)
+
+## Swap in your lab theme here, e.g.:
+## p1 <- p1 + your_lab_theme() + scale_color_manual(values = your_palette)
+
+## Optional: save
+## ggsave("pathogen_rank_by_community_type_slope.png", p1, width = 10, height = 7, dpi = 300)
+
+## ---------------------------------------------------------------
+## 3. Bump chart across community types, faceted by assay
+##    (comparison B: does rank order shift across community types,
+##    and is that shift similar for IgG and PCR?)
+## ---------------------------------------------------------------
+
+# Label pathogens at the last community type on the x-axis
+last_ct <- rank_df %>%
+  distinct(community_type2) %>%
+  pull(community_type2) %>%
+  sort() %>%
+  tail(1)
+
+label_df <- filter(rank_df, community_type2 == last_ct)
+
+p2 <- ggplot(rank_df, aes(x = community_type2, y = rank, group = pathogen, color = pathogen)) +
+  geom_line(linewidth = 0.8, show.legend = FALSE) +
+  geom_point(size = 2.2, show.legend = FALSE) +
+  geom_text_repel(
+    data = label_df, aes(label = pathogen),
+    direction = "y", hjust = 0, xlim = c(NA, NA), size = 2.8, show.legend = FALSE
+  ) +
+  facet_wrap(~assay, ncol = 1) +
+  scale_y_reverse(breaks = breaks_width(1)) +
+  labs(
+    x = "Community type", y = "Rank (1 = highest prevalence)",
+    title = "Pathogen rank order across community types, by assay"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    plot.title = element_text(hjust = 0.5)
+  )
+
+print(p2)
+
+## Optional: save
+## ggsave("pathogen_rank_across_community_type_bump.png", p2, width = 8, height = 9, dpi = 300)
+
+## ---------------------------------------------------------------
+## 4. Compact alternative: rank heatmap (pathogen x community type,
+##    faceted by assay) -- useful if there are many pathogens/community
+##    types and the bump chart gets too busy to read
+## ---------------------------------------------------------------
+
+p3 <- rank_df %>%
+  mutate(pathogen = fct_reorder(pathogen, rank, .fun = mean)) %>%
+  ggplot(aes(x = community_type2, y = pathogen, fill = rank)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = rank), size = 3, color = "black") +
+  facet_wrap(~assay) +
+  scale_fill_viridis_c(direction = -1, name = "Rank") +
+  labs(
+    x = "Community type", y = NULL,
+    title = "Pathogen rank heatmap by community type and assay"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(hjust = 0.5)
+  )
+
+print(p3)
+
+## ---------------------------------------------------------------
+## 5. Wide-format data (one row per pathogen x community type) for
+##    the table below
+## ---------------------------------------------------------------
+
+wide_rank <- sero_rank %>%
+  select(pathogen, community_type2, igg_prevalence = prevalence,
+         igg_lower = lower_ci, igg_upper = upper_ci, igg_rank = rank) %>%
+  inner_join(
+    pcr_rank %>%
+      select(pathogen, community_type2, pcr_prevalence = prevalence,
+             pcr_lower = lower_ci, pcr_upper = upper_ci, pcr_rank = rank),
+    by = c("pathogen", "community_type2")
+  ) %>%
+  mutate(rank_diff = igg_rank - pcr_rank) %>%
+  arrange(community_type2, igg_rank)
+
+## ---------------------------------------------------------------
+## 6. Rank-rank scatter plot (concordance between assays), colored by
+##    community type -- same idea as the aggregate version, but here
+##    every point is one pathogen x community-type combination
+## ---------------------------------------------------------------
+
+p4 <- ggplot(wide_rank, aes(x = igg_rank, y = pcr_rank, color = community_type2)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey60") +
+  geom_point(size = 3) +
+  geom_text_repel(aes(label = pathogen), size = 2.8, max.overlaps = Inf, show.legend = FALSE) +
+  scale_x_continuous(breaks = breaks_width(1)) +
+  scale_y_continuous(breaks = breaks_width(1)) +
+  coord_equal() +
+  scale_color_manual(values = nytpal) +
+  labs(
+    x = "IgG rank", y = "PCR rank", color = NULL,
+    title = "Concordance of pathogen rank between IgG and PCR, by community type"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(), plot.title = element_text(hjust = 0.5))
+
+print(p4)
+
+## If labels get too cluttered with many pathogens/community types, try
+## faceting instead of coloring:
+## p4 + facet_wrap(~community_type2)
+
+## Optional: save
+## ggsave("pathogen_rank_scatter_by_community_type.png", p4, width = 8, height = 7, dpi = 300)
+
+## ---------------------------------------------------------------
+## 7. Summary table, grouped by community type
+## ---------------------------------------------------------------
+
+# NOTE: assumes prevalence/CI columns are proportions (0-1); if they are
+# already percentages, drop the "* 100" below.
+table_df <- wide_rank %>%
+  mutate(
+    IgG = sprintf("%.1f%% (%.1f–%.1f%%)", igg_prevalence * 100, igg_lower * 100, igg_upper * 100),
+    PCR = sprintf("%.1f%% (%.1f–%.1f%%)", pcr_prevalence * 100, pcr_lower * 100, pcr_upper * 100)
+  ) %>%
+  select(community_type2, pathogen, IgG, igg_rank, PCR, pcr_rank, rank_diff)
+
+gt_tbl <- table_df %>%
+  gt(groupname_col = "community_type2") %>%
+  tab_header(title = "Pathogen prevalence and rank order by assay and community type") %>%
+  cols_label(
+    pathogen = "Pathogen",
+    IgG = "IgG prevalence (95% CI)",
+    igg_rank = "IgG rank",
+    PCR = "PCR prevalence (95% CI)",
+    pcr_rank = "PCR rank",
+    rank_diff = "Rank Δ (IgG − PCR)"
+  ) %>%
+  cols_align(align = "center", columns = c(igg_rank, pcr_rank, rank_diff)) %>%
+  opt_row_striping()
+
+gt_tbl <- gt_tbl %>% as.data.frame()
+gt_tbl
+## Optional: save table as image/html
+write_xlsx(gt_tbl, here("output/supp_pathogen_prevalence_table_by_community_type.xlsx"))
+
+```
+
+## Seroconversion rank ordering
+
+### 2a) Overall seroconversion rate vs. PCR prevalence
+
+```{r}
+## ---------------------------------------------------------------
+## Rank order of pathogen seroconversion rate (IgG) vs. PCR prevalence
+## Inputs: pcr_prev_path (pathogen, prevalence, lower_ci, upper_ci)
+##         sero_inc_path (pathogen, ir_per_100, ir_lo_per_100, ir_hi_per_100)
+## (sero_inc_path is labeled "IgG SCR" throughout figures/tables; SCR =
+## seroconversion rate, per 100 person-years)
+## ---------------------------------------------------------------
+
+## 1. Keep only pathogens present in BOTH dataframes, then rank within
+##    each assay (rank 1 = highest rate/prevalence) ----
+shared_pathogens_sc <- intersect(pcr_prev_path$pathogen, sero_inc_path$pathogen)
+
+pcr_rank_sc <- pcr_prev_path %>%
+  filter(pathogen %in% shared_pathogens_sc) %>%
+  transmute(pathogen, assay = "PCR", prevalence, lower_ci, upper_ci) %>%
+  mutate(rank = rank(-prevalence, ties.method = "min"))
+
+sero_inc_rank <- sero_inc_path %>%
+  filter(pathogen %in% shared_pathogens_sc) %>%
+  transmute(pathogen, assay = "IgG SCR",
+            prevalence = ir_obs_per_100, lower_ci = ir_lo_per_100, upper_ci = ir_hi_per_100) %>%
+  mutate(rank = rank(-prevalence, ties.method = "min"))
+
+rank_df_sc <- bind_rows(sero_inc_rank, pcr_rank_sc) %>%
+  mutate(assay = factor(assay, levels = c("IgG SCR", "PCR")))
+
+## 2. Slope/bump chart ---------------------------------------------------
+n_pathogens_sc <- n_distinct(rank_df_sc$pathogen)
+
+p5 <- ggplot(rank_df_sc, aes(x = assay, y = rank, group = pathogen)) +
+  geom_line(aes(color = pathogen), linewidth = 0.9, show.legend = FALSE) +
+  geom_point(aes(color = pathogen), size = 3, show.legend = FALSE) +
+  geom_text(
+    data = filter(rank_df_sc, assay == "IgG SCR"),
+    aes(label = pathogen), x = 0.85, hjust = 1, size = 3.3
+  ) +
+  geom_text(
+    data = filter(rank_df_sc, assay == "PCR"),
+    aes(label = pathogen), x = 2.15, hjust = 0, size = 3.3
+  ) +
+  scale_y_reverse(breaks = seq_len(n_pathogens_sc)) +
+  scale_x_discrete(expand = expansion(add = c(0.9, 0.9))) +
+  labs(
+    x = NULL, y = "Rank (1 = highest rate/prevalence)",
+    title = "Rank order of pathogen seroconversion rate (IgG) vs. PCR prevalence"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(face = "bold", size = 12),
+    plot.title = element_text(hjust = 0.5)
+  )
+
+print(p5)
+
+## Swap in your lab theme here, e.g.:
+## p5 <- p5 + your_lab_theme() + scale_color_manual(values = your_palette)
+
+## Optional: save
+## ggsave("pathogen_rank_scr_slopechart.png", p5, width = 7, height = 0.4 * n_pathogens_sc + 2, dpi = 300)
+
+## ---------------------------------------------------------------
+## 3. Companion dumbbell plot with 95% CIs, ordered by mean rank
+##    NOTE: IgG SCR is a rate per 100 person-years and PCR prevalence
+##    is a proportion -- different units plotted on one x-axis so the
+##    ranks/CIs sit side by side. If the mixed units are misleading,
+##    consider faceting by assay with independent x-scales instead.
+## ---------------------------------------------------------------
+
+order_df_sc <- rank_df_sc %>%
+  group_by(pathogen) %>%
+  summarize(mean_rank = mean(rank), .groups = "drop") %>%
+  arrange(mean_rank)
+
+rank_df_sc2 <- rank_df_sc %>%
+  mutate(pathogen = factor(pathogen, levels = rev(order_df_sc$pathogen)))
+
+p6 <- ggplot(rank_df_sc2, aes(x = prevalence, y = pathogen, color = assay)) +
+geom_line(aes(group = pathogen), color = "grey70", linewidth = 0.6) +
+geom_errorbarh(aes(xmin = lower_ci, xmax = upper_ci),
+height = 0.15, position = position_dodge(width = 0.4)) +
+geom_point(size = 3, position = position_dodge(width = 0.4)) +
+scale_color_manual(values = c(PCR = "#009E73", `IgG SCR` = "#CC79A7")) +
+labs(
+x = "PCR prevalence / IgG seroconversion rate (per 100 py)", y = NULL, color = "Assay",
+title = "Pathogen seroconversion rate (IgG) and PCR prevalence (ranked, with 95% CI)"
+) +
+theme_minimal(base_size = 12) +
+theme(panel.grid.minor = element_blank())
+
+print(p6)
+
+## ---------------------------------------------------------------
+## 4. Wide-format data (one row per pathogen) used by the scatter
+##    plot and table below
+## ---------------------------------------------------------------
+
+wide_rank_sc <- sero_inc_rank %>%
+  select(pathogen, igg_scr = prevalence, igg_scr_lower = lower_ci,
+         igg_scr_upper = upper_ci, igg_rank = rank) %>%
+  inner_join(
+    pcr_rank_sc %>%
+      select(pathogen, pcr_prevalence = prevalence, pcr_lower = lower_ci,
+             pcr_upper = upper_ci, pcr_rank = rank),
+    by = "pathogen"
+  ) %>%
+  mutate(rank_diff = igg_rank - pcr_rank) %>%
+  arrange(igg_rank)
+
+## ---------------------------------------------------------------
+## 5. Rank-rank scatter plot (concordance between assays)
+##    Points on the dashed diagonal = same rank in both assays;
+##    the further off the diagonal, the more the assays disagree.
+## ---------------------------------------------------------------
+
+p7 <- ggplot(wide_rank_sc, aes(x = pcr_rank, y = igg_rank)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey60") +
+  geom_point(size = 3, color = "steelblue") +
+  geom_text_repel(aes(label = pathogen), size = 3.3, max.overlaps = Inf) +
+  scale_x_reverse(breaks = seq_len(n_pathogens_sc)) +
+  scale_y_reverse(breaks = seq_len(n_pathogens_sc)) +
+  coord_equal() +
+  labs(
+    y = "IgG seroconversion rate rank", x = "PCR prevalence rank") +
+    #title = "Concordance of pathogen rank between IgG seroconversion rate and PCR prevalence"
+  #) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+
+print(p7)
+ggsave(here("figures/suppfig9_concordance_path_rank_scr_all.tiff"), p7, width = 250, height = 190, units = "mm")
+
+## ---------------------------------------------------------------
+## 6. Summary table (pathogen, prevalence/rate + 95% CI, and rank,
+##    by assay)
+## ---------------------------------------------------------------
+
+# NOTE: PCR columns assume prevalence/CI are proportions (0-1); if they
+# are already percentages, drop the "* 100" below. IgG SCR is assumed to
+# already be on the "per 100 person-years" scale (ir_per_100 etc.).
+table_df_sc <- wide_rank_sc %>%
+  mutate(
+    `IgG SCR (per 100 py)` = sprintf("%.1f (%.1f–%.1f)", igg_scr, igg_scr_lower, igg_scr_upper),
+    PCR = sprintf("%.1f%% (%.1f–%.1f%%)", pcr_prevalence * 100, pcr_lower * 100, pcr_upper * 100)
+  ) %>%
+  select(pathogen, `IgG SCR (per 100 py)`, igg_rank, PCR, pcr_rank, rank_diff)
+
+gt_tbl_sc <- table_df_sc %>%
+  gt() %>%
+  tab_header(title = "Pathogen seroconversion rate (IgG) and PCR prevalence, ranked") %>%
+  cols_label(
+    pathogen = "Pathogen",
+    igg_rank = "IgG SCR rank",
+    pcr_rank = "PCR rank",
+    rank_diff = "Rank Δ (IgG − PCR)"
+  ) %>%
+  cols_align(align = "center", columns = c(igg_rank, pcr_rank, rank_diff)) %>%
+  opt_row_striping()
+
+gt_tbl_sc
+
+## Optional: save table as image/html
+## gtsave(gt_tbl_sc, "pathogen_seroconversion_pcr_table.png")
+
+
+```
+
+### 2b) Seroconversion rate by community type vs. PCR prevalence
+
+```{r}
+
+## 1. Keep only pathogen x community_type2 combinations present in BOTH
+##    dataframes, then rank within each assay x community_type2 group
+##    (rank 1 = highest rate/prevalence) ----
+
+common_combos_sc <- inner_join(
+  pcr_prev_type %>% distinct(pathogen, community_type2),
+  sero_inc_type %>% distinct(pathogen, community_type2),
+  by = c("pathogen", "community_type2")
+)
+
+pcr_rank_sc_ct <- pcr_prev_type %>%
+  semi_join(common_combos_sc, by = c("pathogen", "community_type2")) %>%
+  transmute(pathogen, community_type2,
+            assay = "PCR", prevalence = pcr_prevalence, lower_ci, upper_ci) %>%
+  group_by(community_type2) %>%
+  mutate(rank = rank(-prevalence, ties.method = "min")) %>%
+  ungroup()
+
+sero_inc_rank_ct <- sero_inc_type %>%
+  semi_join(common_combos_sc, by = c("pathogen", "community_type2")) %>%
+  transmute(pathogen, community_type2,
+            assay = "IgG SCR", prevalence = ir_per_100,
+            lower_ci = ir_lo_per_100, upper_ci = ir_hi_per_100) %>%
+  group_by(community_type2) %>%
+  mutate(rank = rank(-prevalence, ties.method = "min")) %>%
+  ungroup()
+
+rank_df_sc_ct <- bind_rows(sero_inc_rank_ct, pcr_rank_sc_ct) %>%
+  mutate(assay = factor(assay, levels = c("IgG SCR", "PCR")))
+
+## ---------------------------------------------------------------
+## 2. Faceted slope/bump chart: IgG SCR vs. PCR rank, one panel per
+##    community type
+## ---------------------------------------------------------------
+
+p8 <- ggplot(rank_df_sc_ct, aes(x = assay, y = rank, group = pathogen)) +
+  geom_line(aes(color = pathogen), linewidth = 0.8, show.legend = FALSE) +
+  geom_point(aes(color = pathogen), size = 2.5, show.legend = FALSE) +
+  geom_text(
+    data = filter(rank_df_sc_ct, assay == "IgG SCR"),
+    aes(label = pathogen), x = 0.8, hjust = 1, size = 2.8
+  ) +
+  geom_text(
+    data = filter(rank_df_sc_ct, assay == "PCR"),
+    aes(label = pathogen), x = 2.2, hjust = 0, size = 2.8
+  ) +
+  facet_wrap(~community_type2, scales = "free_y", ncol = 1) +
+  scale_y_reverse(breaks = breaks_width(1)) +
+  scale_x_discrete(expand = expansion(add = c(1.1, 1.1))) +
+  labs(
+    x = NULL, y = "Rank (1 = highest rate/prevalence)",
+    title = "Rank order of seroconversion rate (IgG) vs. PCR prevalence, by community type"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(face = "bold"),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(hjust = 0.5)
+  )
+
+print(p8)
+
+## Swap in your lab theme here, e.g.:
+## p8 <- p8 + your_lab_theme() + scale_color_manual(values = your_palette)
+
+## Optional: save
+## ggsave("pathogen_rank_scr_by_community_type_slope.png", p8, width = 10, height = 7, dpi = 300)
+
+## ---------------------------------------------------------------
+## 3. Bump chart across community types, faceted by assay
+##    (does rank order shift across community types, and is that
+##    shift similar for IgG SCR and PCR?)
+## ---------------------------------------------------------------
+
+last_ct_sc <- rank_df_sc_ct %>%
+  distinct(community_type2) %>%
+  pull(community_type2) %>%
+  sort() %>%
+  tail(1)
+
+label_df_sc <- filter(rank_df_sc_ct, community_type2 == last_ct_sc)
+
+p9 <- ggplot(rank_df_sc_ct, aes(x = community_type2, y = rank, group = pathogen, color = pathogen)) +
+  geom_line(linewidth = 0.8, show.legend = FALSE) +
+  geom_point(size = 2.2, show.legend = FALSE) +
+  geom_text_repel(
+    data = label_df_sc, aes(label = pathogen),
+    direction = "y", hjust = 0, xlim = c(NA, NA), size = 2.8, show.legend = FALSE
+  ) +
+  facet_wrap(~assay, ncol = 1) +
+  scale_y_reverse(breaks = breaks_width(1)) +
+  labs(
+    x = "Community type", y = "Rank (1 = highest rate/prevalence)",
+    title = "Pathogen rank order across community types: seroconversion rate (IgG) vs. PCR prevalence"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    plot.title = element_text(hjust = 0.5)
+  )
+
+print(p9)
+
+## Optional: save
+## ggsave("pathogen_rank_scr_across_community_type_bump.png", p9, width = 8, height = 9, dpi = 300)
+
+## ---------------------------------------------------------------
+## 4. Compact alternative: rank heatmap (pathogen x community type,
+##    faceted by assay)
+## ---------------------------------------------------------------
+
+p10 <- rank_df_sc_ct %>%
+  mutate(pathogen = fct_reorder(pathogen, rank, .fun = mean)) %>%
+  ggplot(aes(x = community_type2, y = pathogen, fill = rank)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = rank), size = 3, color = "black") +
+  facet_wrap(~assay) +
+  scale_fill_viridis_c(direction = -1, name = "Rank") +
+  labs(
+    x = "Community type", y = NULL,
+    title = "Pathogen rank heatmap by community type: seroconversion rate (IgG) vs. PCR prevalence"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(hjust = 0.5)
+  )
+
+print(p10)
+
+## ---------------------------------------------------------------
+## 5. Wide-format data (one row per pathogen x community type) for
+##    the table below
+## ---------------------------------------------------------------
+
+wide_rank_sc_ct <- sero_inc_rank_ct %>%
+  select(pathogen, community_type2, igg_scr = prevalence,
+         igg_scr_lower = lower_ci, igg_scr_upper = upper_ci, igg_rank = rank) %>%
+  inner_join(
+    pcr_rank_sc_ct %>%
+      select(pathogen, community_type2, pcr_prevalence = prevalence,
+             pcr_lower = lower_ci, pcr_upper = upper_ci, pcr_rank = rank),
+    by = c("pathogen", "community_type2")
+  ) %>%
+  mutate(rank_diff = igg_rank - pcr_rank) %>%
+  arrange(community_type2, pcr_rank)
+
+## ---------------------------------------------------------------
+## 6. Rank-rank scatter plot (concordance between assays), colored by
+##    community type
+## ---------------------------------------------------------------
+
+p11 <- ggplot(wide_rank_sc_ct, aes(x = pcr_rank, y = igg_rank, color = community_type2)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey60") +
+  geom_point(size = 3) +
+  geom_text_repel(aes(label = pathogen), size = 2.8, max.overlaps = Inf, show.legend = FALSE) +
+  scale_x_continuous(breaks = breaks_width(1)) +
+  scale_y_continuous(breaks = breaks_width(1)) +
+  coord_equal() +
+  scale_color_manual(values = nytpal) +
+  labs(
+    x = "IgG seroconversion rate rank", y = "PCR prevalence rank", color = NULL,
+    title = "Concordance of pathogen rank: seroconversion rate (IgG) vs. PCR prevalence, by community type"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(), plot.title = element_text(hjust = 0.5))
+
+print(p11)
+
+## If labels get too cluttered with many pathogens/community types, try
+## faceting instead of coloring:
+## p11 + facet_wrap(~community_type2)
+
+## Optional: save
+## ggsave("pathogen_rank_scr_scatter_by_community_type.png", p11, width = 8, height = 7, dpi = 300)
+
+## ---------------------------------------------------------------
+## 7. Summary table, grouped by community type
+## ---------------------------------------------------------------
+
+# NOTE: PCR columns assume prevalence/CI are proportions (0-1); if they
+# are already percentages, drop the "* 100" below.
+table_df_sc_ct <- wide_rank_sc_ct %>%
+  mutate(
+    PCR = sprintf("%.1f%% (%.1f–%.1f%%)", pcr_prevalence * 100, pcr_lower * 100, pcr_upper * 100),
+    `IgG SCR (per 100 py)` = sprintf("%.1f (%.1f–%.1f)", igg_scr, igg_scr_lower, igg_scr_upper)
+  ) %>%
+  select(community_type2, pathogen, PCR, pcr_rank, `IgG SCR (per 100 py)`, igg_rank, rank_diff)
+
+gt_tbl_sc_ct <- table_df_sc_ct %>%
+  gt(groupname_col = "community_type2") %>%
+  tab_header(title = "Pathogen seroconversion rate (IgG) and PCR prevalence by community type, ranked") %>%
+  cols_label(
+    pathogen = "Pathogen",
+    pcr_rank = "PCR rank",
+    igg_rank = "IgG SCR rank",
+    rank_diff = "Rank Δ (IgG − PCR)"
+  ) %>%
+  cols_align(align = "center", columns = c(igg_rank, pcr_rank, rank_diff)) %>%
+  opt_row_striping()
+
+
+gt_tbl_sc_ct <- gt_tbl_sc_ct %>% as.data.frame()
+gt_tbl_sc_ct
+## Optional: save table as image/html
+write_xlsx(gt_tbl_sc_ct, here("output/supp_pathogen_seroconv_pcr_table_by_community_type.xlsx"))
+
+```
