@@ -151,13 +151,14 @@ HlyE is excluded from *S. enterica* seropositivity. Additional targets appear in
 
 ## Citation
 
-> [Citation to be added upon publication]
+> pre-print
+>
+> 
 
 ---
 
-## OSF Repository
+## Zenodo Repository
 
-> https://doi.org/10.17605/OSF.IO/HDE8K
 
 ---
 
