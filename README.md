@@ -59,13 +59,6 @@ Raw data are not publicly available due to human subjects research protections a
 
 All scripts use the v02 serology release (2026-10-07) and the PCR analysis dataset built from it:
 
-| Dataset | Used by |
-|---------|---------|
-| `ecomid_sero_antigen_seropos_long_v02_20261007` (`.csv`; `.rds` in script 7) | 1, 3, 5, 6, 7, 9, 10, 12, 14, 15, 19 |
-| `ecomid_sero_antigen_seropos_long_enteric_cutoffs_v02_20261007.csv` | 11 |
-| `ecomid_sero_antigen_seropos_enteric_cutoffs_plotting_v02_20261007.rds` | 8 |
-| `data/ecomid_pcr_analysis_data_2026-10-07.rds` (created by script 3) | 4, 7, 10, 11, 12, 14, 15, 17, 19 |
-
 Scripts 1, 2, 3, 5, 6 and 19 also read field survey, child visit, community GPS, and raw GPP/TAC files, which are not included.
 
 ---
@@ -86,11 +79,11 @@ Scripts were developed in **R 4.4** using Quarto. Key packages are loaded centra
 
 Scripts must be run in numerical order (0–19); the numbering follows the dependency chain:
 
-- **Script 3** processes raw GPP + TAC PCR data into the harmonized analysis dataset (`data/ecomid_pcr_analysis_data_2026-10-07.rds`). It must be run before any script that reads that dataset: **4, 7, 10, 11, 12, 14, 15, 17, 19**.
+- **Script 3** processes raw GPP + TAC PCR data into the harmonized analysis dataset. It must be run before any script that reads that dataset: **4, 7, 10, 11, 12, 14, 15, 17, 19**.
 - **Scripts 4, 5, and 6** produce the PCR prevalence, seroincidence/seroconversion, and seroreversion summary tables (including the 3-level community classification) consumed by **scripts 10–12 and 15–18**.
 - **Script 7** produces the point-prevalence and cumulative-incidence (Kaplan-Meier) datasets required by **scripts 10 and 13**.
 - **Script 10** produces `output/dotplot_scr_vs_srr.rds`, read by **script 12**.
-- **Script 15** generates the PCR/IgG concordance classification (`output/ecomid_seropos_pcr_alltargets.rds`) required by **script 19**.
+- **Script 15** generates the PCR/IgG concordance classification required by **script 19**.
 - **Script 17** generates the measures-of-association estimates (SCRR, prevalence ratios) required by **script 18**.
 
 ```r
